@@ -159,11 +159,12 @@ manage_identity() {
     done
 }
 
-# --- Module 2: Repository Setup & Push Engine ---
+# --- Module 2: Repository Setup & Smart Push Engine ---
 manage_repo() {
     while true; do
         show_header
-        echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup & Smart Push Engine${NC}\n"
+        echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup & Smart Push Engine${NC}"
+        echo -e "${CYAN}💡 Hint: Use Module 1 first if you need to configure your SSH keys or global user info.${NC}\n"
         echo -e "  ${GREEN}[1]${NC} 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote)"
         echo -e "  ${GREEN}[2]${NC} Quick Push (Add All -> Commit -> Push)"
         echo -e "  ${GREEN}[3]${NC} ${BOLD}Smart Conflict Push Resolver${NC} ${RED}(Fixes Rejected Pushes!)${NC}"
@@ -187,15 +188,40 @@ manage_repo() {
                     git commit -m "$MSG"
                 fi
 
-                read -p "Enter GitHub Remote Repository URL: " RAW_URL
+                # --- Guideline & Remote Detection Banner ---
+                EXISTING_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
+                echo -e "\n${CYAN}====================================================================${NC}"
+                echo -e "${CYAN}${BOLD}📌 GITHUB REMOTE URL SETUP GUIDELINE${NC}"
+                echo -e "${CYAN}====================================================================${NC}"
+                
+                if [[ -n "$EXISTING_REMOTE" ]]; then
+                    echo -e "${GREEN}[✔] Existing Remote Detected:${NC} $EXISTING_REMOTE"
+                    echo -e "${YELLOW}--> Press [ENTER] to keep this remote and push immediately!${NC}"
+                    echo -e "--> Or paste a NEW URL below to overwrite it.\n"
+                else
+                    echo -e "Enter your GitHub repository URL."
+                    echo -e "Example formats:"
+                    echo -e "  • ${GREEN}SSH (Recommended):${NC}   git@github.com:username/repository.git"
+                    echo -e "  • ${GREEN}HTTPS:${NC}              https://github.com/username/repository.git\n"
+                fi
+
+                read -p "Enter Remote URL (or press ENTER to keep current): " RAW_URL
                 REMOTE_URL=$(clean_remote_url "$RAW_URL")
 
                 if [[ -n "$REMOTE_URL" ]]; then
                     git remote remove origin 2>/dev/null || true
                     git remote add origin "$REMOTE_URL"
                     echo -e "${GREEN}[✔] Remote attached: $REMOTE_URL${NC}"
+                elif [[ -n "$EXISTING_REMOTE" ]]; then
+                    REMOTE_URL="$EXISTING_REMOTE"
+                    echo -e "${GREEN}[✔] Using existing remote: $REMOTE_URL${NC}"
+                fi
+
+                if [[ -n "$REMOTE_URL" ]]; then
                     echo -e "${GREEN}--> Pushing to origin main...${NC}"
                     git push -u origin main || echo -e "${YELLOW}[!] Push rejected or refused. Use Option [3] (Smart Conflict Push Resolver) to sync!${NC}"
+                else
+                    echo -e "${YELLOW}[!] No remote URL configured. Add one using Module 1 Option [4] or rerun this option.${NC}"
                 fi
                 pause
                 ;;

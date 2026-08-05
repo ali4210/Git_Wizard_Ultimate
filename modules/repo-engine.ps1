@@ -33,15 +33,39 @@ function Manage-GitRepo {
                 git commit -m "$msg"
             }
 
-            $rawUrl = Read-Host "Enter GitHub Remote Repository URL"
+            $existingRemote = git remote get-url origin 2>$null
+            Write-Host "`n====================================================================" -ForegroundColor Cyan
+            Write-Host "  📌 GITHUB REMOTE URL SETUP GUIDELINE                              " -ForegroundColor Yellow
+            Write-Host "====================================================================" -ForegroundColor Cyan
+
+            if ($existingRemote) {
+                Write-Host "[✔] Existing Remote Detected: $existingRemote" -ForegroundColor Green
+                Write-Host "--> Press [ENTER] to keep this remote and push immediately!" -ForegroundColor Yellow
+                Write-Host "--> Or paste a NEW URL below to overwrite it.`n"
+            } else {
+                Write-Host "Enter your GitHub repository URL."
+                Write-Host "Example formats:"
+                Write-Host "  • SSH (Recommended):   git@github.com:username/repository.git" -ForegroundColor Green
+                Write-Host "  • HTTPS:              https://github.com/username/repository.git`n" -ForegroundColor Green
+            }
+
+            $rawUrl = Read-Host "Enter Remote URL (or press ENTER to keep current)"
             $remoteUrl = Clean-RemoteUrl $rawUrl
 
             if ($remoteUrl) {
                 git remote remove origin 2>$null
                 git remote add origin "$remoteUrl"
                 Write-Host "[✔] Remote attached: $remoteUrl" -ForegroundColor Green
+            } elseif ($existingRemote) {
+                $remoteUrl = $existingRemote
+                Write-Host "[✔] Using existing remote: $remoteUrl" -ForegroundColor Green
+            }
+
+            if ($remoteUrl) {
                 Write-Host "--> Pushing to origin main..." -ForegroundColor Green
                 git push -u origin main
+            } else {
+                Write-Host "[!] No remote URL configured." -ForegroundColor Yellow
             }
             Pause-Console
         }
