@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# TOOL NAME:    git-wizard.sh (V1.0 Ultimate Release)
+# TOOL NAME:    git-wizard.sh (V1.1 Enhanced Release)
 # AUTHOR:       Saleem (Open Source DevOps/Sec Contributor)
 # DESCRIPTION:  Interactive CLI Suite for Git/GitHub Onboarding & Workflows.
 # COMPATIBILITY: Debian, Ubuntu, Kali Linux, RHEL, CentOS, Fedora, Arch
@@ -85,10 +85,44 @@ pause() {
     read -p "Press [ENTER] to return to menu..."
 }
 
+
+show_uptodate_celebration() {
+    echo -e "${GREEN}${BOLD}"
+    cat << "EOF"
+          ,~-.
+         (   ' )-.          ,~'`-.
+      ,~' `   ' ) )        _(    _) )
+     ( ( .--.===.--.    (   `    ' )
+      `.%%.;::|888.#`.   `-'`~~=~'
+      /%%/::::|8888\##\
+     |%%/:::::|88888\##|
+     |%%|:::::|88888|##|.,-.
+     \%%|:::::|88888|##/    )_
+      \%\:::::|88888/#/ ( `'   )
+       \%\::::|8888/#/(  ,  -'`-.
+   ,~-. `%\:::|888/#'(  (      ') )
+  (   ) )_ `\__|__/'    `~-~=--~~='
+ ( ` ')  ) [VVVVV]
+(_(_.~~~'   \|_|/   hjw
+            [XXX]
+            `"""'
+EOF
+    echo -e "${NC}"
+    echo -e "${GREEN}${BOLD}Everything up-to-date! Code is safe and synced on GitHub!${NC}"
+}
+
+
 # --- Clean URL Helper ---
 clean_remote_url() {
     local input_url="$1"
     # Strip leading 'git remote add/set-url origin' if user pasted entire command
+    input_url=$(echo "$input_url" | sed -E 's/^git remote (add|set-url) origin //I' | xargs)
+    echo "$input_url"
+}
+
+# --- Clean URL Helper ---
+clean_remote_url() {
+    local input_url="$1"
     input_url=$(echo "$input_url" | sed -E 's/^git remote (add|set-url) origin //I' | xargs)
     echo "$input_url"
 }
@@ -216,19 +250,21 @@ manage_identity() {
     done
 }
 
-# --- Module 2: Repository Setup & Smart Push Engine ---
+# --- Module 2: Repository Setup, Status & Reset Engine ---
 manage_repo() {
     while true; do
         show_header
-        echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup & Smart Push Engine${NC}"
+        echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup, Status & Reset Engine${NC}"
         echo -e "${CYAN}💡 Hint: Use Module 1 first if you need to configure your SSH keys or global user info.${NC}\n"
         echo -e "  ${GREEN}[1]${NC} 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote, Push)"
         echo -e "  ${GREEN}[2]${NC} Quick Push (Add All -> Commit -> Push)"
-        echo -e "  ${GREEN}[3]${NC} ${BOLD}Smart Conflict Push Resolver${NC} ${RED}(Fixes Rejected Pushes!)${NC}"
-        echo -e "  ${GREEN}[4]${NC} Generate Tailored .gitignore File"
-        echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
+        echo -e "  ${GREEN}[3]${NC} ${BOLD}Inspect Working Directory Status${NC} ${CYAN}(git status)${NC}"
+        echo -e "  ${GREEN}[4]${NC} ${BOLD}Interactive Git Reset & Undo Utility${NC} ${CYAN}(Unstage, Revert, Rollback)${NC}"
+        echo -e "  ${GREEN}[5]${NC} ${BOLD}Smart Conflict Push Resolver${NC} ${RED}(Fixes Rejected Pushes!)${NC}"
+        echo -e "  ${GREEN}[6]${NC} Generate Tailored .gitignore File"
+        echo -e "  ${GREEN}[7]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
-        read -p "Select choice [1-5]: " REPO_CHOICE
+        read -p "Select choice [1-7]: " REPO_CHOICE
 
         case $REPO_CHOICE in
             1)
@@ -276,7 +312,7 @@ manage_repo() {
 
                 if [[ -n "$REMOTE_URL" ]]; then
                     echo -e "${GREEN}--> Pushing to origin main...${NC}"
-                    git push -u origin main || echo -e "${YELLOW}[!] Push rejected or refused. Use Option [3] (Smart Conflict Push Resolver) to sync!${NC}"
+                    git push -u origin main || echo -e "${YELLOW}[!] Push rejected or refused. Use Option [5] (Smart Conflict Push Resolver) to sync!${NC}"
                 else
                     echo -e "${YELLOW}[!] No remote URL configured. Add one using Module 1 Option [4] or rerun this option.${NC}"
                 fi
@@ -285,7 +321,8 @@ manage_repo() {
             2)
                 git add .
                 if [[ -z "$(git status --porcelain)" ]]; then
-                    echo -e "${YELLOW}[i] Working tree clean (no new changes to commit). Pushing existing commits...${NC}"
+                    echo -e "${YELLOW}[i] Working tree clean (no new changes to commit).${NC}\n"
+                    show_uptodate_celebration
                 else
                     read -p "Enter commit message: " MSG
                     if [[ -z "$MSG" ]]; then
@@ -294,12 +331,77 @@ manage_repo() {
                         continue
                     fi
                     git commit -m "$MSG"
+                    BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+                    git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [5] to resolve conflicts!${NC}"
                 fi
-                BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-                git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [3] to resolve conflicts!${NC}"
                 pause
                 ;;
             3)
+                show_header
+                echo -e "${YELLOW}${BOLD}📌 WORKING DIRECTORY & STAGING STATUS${NC}\n"
+                if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+                    echo -e "${RED}[!] Not inside a Git repository! Run Option [1] first.${NC}"
+                else
+                    BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+                    echo -e "Current Active Branch: ${CYAN}$BRANCH${NC}\n"
+                    
+                    STATUS_OUT=$(git status --porcelain)
+                    if [[ -z "$STATUS_OUT" ]]; then
+                        show_uptodate_celebration
+                    else
+                        GIT_PAGER=cat git status
+                    fi
+                fi
+                pause
+                ;;
+            4)
+                while true; do
+                    show_header
+                    echo -e "${YELLOW}${BOLD}📌 INTERACTIVE GIT RESET & UNDO UTILITY${NC}\n"
+                    echo -e "  ${GREEN}[1]${NC} Unstage All Files ${CYAN}(Keep modified changes, remove from staging)${NC}"
+                    echo -e "  ${GREEN}[2]${NC} Discard All Uncommitted Local Changes ${RED}(Revert files to last commit)${NC}"
+                    echo -e "  ${GREEN}[3]${NC} Soft Rollback Last Commit ${CYAN}(Undo commit, KEEP changes staged)${NC}"
+                    echo -e "  ${RED}[4]${NC} Hard Rollback Last Commit ${RED}(DESTROY last commit & all changes!)${NC}"
+                    echo -e "  ${GREEN}[5]${NC} Back to Module 2 Menu"
+                    echo -e "\n===================================================================="
+                    read -p "Select choice [1-5]: " RESET_CHOICE
+
+                    case $RESET_CHOICE in
+                        1)
+                            echo -e "\n${GREEN}--> Unstaging all files...${NC}"
+                            git reset HEAD
+                            echo -e "${GREEN}[✔] All staged files reverted to unstaged!${NC}"
+                            pause
+                            ;;
+                        2)
+                            read -p "ARE YOU SURE? This will DISCARD all uncommitted work! (y/N): " CONF
+                            if [[ "$CONF" =~ ^[Yy]$ ]]; then
+                                git checkout -- . 2>/dev/null || true
+                                git clean -fd 2>/dev/null || true
+                                echo -e "${GREEN}[✔] Local working tree wiped clean to last commit state!${NC}"
+                            fi
+                            pause
+                            ;;
+                        3)
+                            echo -e "\n${GREEN}--> Soft rolling back last commit...${NC}"
+                            git reset --soft HEAD~1
+                            echo -e "${GREEN}[✔] Commit undone! Your files remain intact in the staging area.${NC}"
+                            pause
+                            ;;
+                        4)
+                            read -p "CRITICAL WARNING: This will PERMANENTLY ERASE your last commit and work! (y/N): " CONF
+                            if [[ "$CONF" =~ ^[Yy]$ ]]; then
+                                git reset --hard HEAD~1
+                                echo -e "${GREEN}[✔] Hard reset complete. Last commit and work removed.${NC}"
+                            fi
+                            pause
+                            ;;
+                        5) break ;;
+                        *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
+                    esac
+                done
+                ;;
+            5)
                 show_header
                 echo -e "${YELLOW}${BOLD}📌 SMART CONFLICT PUSH RESOLVER Engine${NC}\n"
                 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
@@ -333,7 +435,7 @@ manage_repo() {
                 esac
                 pause
                 ;;
-            4)
+            6)
                 echo -e "\nSelect template type for .gitignore:"
                 echo -e "  [1] Python / Django / Flask"
                 echo -e "  [2] Node.js / React / Next.js"
@@ -376,18 +478,15 @@ EOF
                 esac
                 pause
                 ;;
-            5) break ;;
+            7) break ;;
             *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
         esac
     done
 }
 
 # --- Module 3: Advanced Branch Manager ---
-
-# --- Interactive Arrow-Key Branch Selector Helper ---
 select_branch_interactive() {
     local prompt="$1"
-    # FORCE GIT_PAGER=cat to prevent less/q pager popup
     local branch_list=$(GIT_PAGER=cat git branch --format="%(refname:short)")
     
     if [[ -z "$branch_list" ]]; then
@@ -395,7 +494,6 @@ select_branch_interactive() {
         return 1
     fi
 
-    # Read into array safely
     local branches=()
     while IFS= read -r line; do
         [[ -n "$line" ]] && branches+=("$line")
@@ -404,7 +502,6 @@ select_branch_interactive() {
     local selected=0
     local key=""
 
-    # Hide cursor
     tput civis 2>/dev/null || true
 
     while true; do
@@ -421,18 +518,17 @@ select_branch_interactive() {
         done
         echo -e "\n===================================================================="
 
-        # Read keypress
         read -rsn1 key
         if [[ $key == $'\x1b' ]]; then
             read -rsn2 key
-            if [[ $key == "[A" ]]; then # Up arrow
+            if [[ $key == "[A" ]]; then
                 ((selected--))
                 if [[ $selected -lt 0 ]]; then selected=$((${#branches[@]} - 1)); fi
-            elif [[ $key == "[B" ]]; then # Down arrow
+            elif [[ $key == "[B" ]]; then
                 ((selected++))
                 if [[ $selected -ge ${#branches[@]} ]]; then selected=0; fi
             fi
-        elif [[ $key == "" ]]; then # Enter key
+        elif [[ $key == "" ]]; then
             tput cnorm 2>/dev/null || true
             SELECTED_BRANCH="${branches[$selected]}"
             return 0
@@ -456,7 +552,6 @@ manage_branches() {
             1)
                 show_header
                 echo -e "${CYAN}${BOLD}--- Local Branches ---${NC}"
-                # FORCE GIT_PAGER=cat here!
                 GIT_PAGER=cat git branch -vv
                 echo -e "\n${CYAN}${BOLD}--- Remote Branches ---${NC}"
                 GIT_PAGER=cat git branch -r
@@ -554,7 +649,7 @@ while true; do
     show_header
     echo -e "Main Capabilities Suite:\n"
     echo -e "  ${GREEN}[1]${NC} Identity & SSH Manager ${CYAN}(Config, Keys, Connections, Remotes)${NC}"
-    echo -e "  ${GREEN}[2]${NC} Repository & Smart Push Engine ${CYAN}(Init, Conflict Resolver, .gitignore)${NC}"
+    echo -e "  ${GREEN}[2]${NC} Repository & Smart Push Engine ${CYAN}(Init, Status, Reset, Conflict Resolver)${NC}"
     echo -e "  ${GREEN}[3]${NC} Advanced Branch Manager ${CYAN}(Local/Remote Sync & Dual Delete)${NC}"
     echo -e "  ${GREEN}[4]${NC} Conventional Commit Assistant ${CYAN}(Professional Formatting)${NC}"
     echo -e "  ${GREEN}[5]${NC} Exit"

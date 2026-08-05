@@ -1,22 +1,51 @@
 # ==============================================================================
 # MODULE:       repo-engine.ps1
-# DESCRIPTION:  Handles 1-Click Repo Setup, Smart Push, and .gitignore.
+# DESCRIPTION:  Handles Repo Setup, Status Inspection, Reset, and Smart Push.
 # ==============================================================================
 
+
+function Show-UpToDateCelebration {
+    Write-Host @"
+          ,~-.
+         (   ' )-.          ,~'`-.
+      ,~' `   ' ) )        _(    _) )
+     ( ( .--.===.--.    (   `    ' )
+      `.%%.;::|888.#`.   `-'`~~=~'
+      /%%/::::|8888\##\
+     |%%/:::::|88888\##|
+     |%%|:::::|88888|##|.,-.
+     \%%|:::::|88888|##/    )_
+      \%\:::::|88888/#/ ( `'   )
+       \%\::::|8888/#/(  ,  -'`-.
+   ,~-. `%\:::|888/#'(  (      ') )
+  (   ) )_ `\__|__/'    `~-~=--~~='
+ ( ` ')  ) [VVVVV]
+(_(_.~~~'   \|_|/   hjw
+            [XXX]
+            `"""'
+"@ -ForegroundColor Green
+    Write-Host "Everything up-to-date! Code is safe and synced on GitHub!" -ForegroundColor Green
+}
+
 function Manage-GitRepo {
+    # Ensure GIT_PAGER=cat is enforced for clean output
+    $env:GIT_PAGER = "cat"
+
     while ($true) {
         Clear-Host
         Write-Host "====================================================================" -ForegroundColor Cyan
-        Write-Host "  [+] Module 2: Repository Setup & Smart Push Engine (Windows)     " -ForegroundColor Yellow
+        Write-Host "  [+] Module 2: Repository Setup, Status & Reset Engine (Windows)  " -ForegroundColor Yellow
         Write-Host "====================================================================" -ForegroundColor Cyan
         Write-Host "  [1] 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote, Push)"
         Write-Host "  [2] Quick Push (Add All -> Commit -> Push)"
-        Write-Host "  [3] Smart Conflict Push Resolver (Fixes Refused Pushes!)"
-        Write-Host "  [4] Generate Tailored .gitignore File"
-        Write-Host "  [5] Back to Main Menu"
+        Write-Host "  [3] Inspect Working Directory Status (git status)"
+        Write-Host "  [4] Interactive Git Reset & Undo Utility (Unstage, Revert, Rollback)"
+        Write-Host "  [5] Smart Conflict Push Resolver (Fixes Refused Pushes!)"
+        Write-Host "  [6] Generate Tailored .gitignore File"
+        Write-Host "  [7] Back to Main Menu"
         Write-Host "====================================================================" -ForegroundColor Cyan
 
-        $choice = Read-Host "Select choice [1-5]"
+        $choice = Read-Host "Select choice [1-7]"
 
         if ($choice -eq "1") {
             Write-Host "`n--> Initializing Git repository..." -ForegroundColor Green
@@ -89,6 +118,68 @@ function Manage-GitRepo {
             Pause-Console
         }
         elseif ($choice -eq "3") {
+            Clear-Host
+            Write-Host "====================================================================" -ForegroundColor Cyan
+            Write-Host "  📌 WORKING DIRECTORY & STAGING STATUS                             " -ForegroundColor Yellow
+            Write-Host "====================================================================" -ForegroundColor Cyan
+            $insideRepo = git rev-parse --is-inside-work-tree 2>$null
+            if ($insideRepo -ne "true") {
+                Write-Host "[!] Not inside a Git repository!" -ForegroundColor Red
+            } else {
+                $branch = (git rev-parse --abbrev-ref HEAD 2>$null).Trim()
+                Write-Host "Current Active Branch: $branch`n" -ForegroundColor Green
+                git status
+            }
+            Pause-Console
+        }
+        elseif ($choice -eq "4") {
+            while ($true) {
+                Clear-Host
+                Write-Host "====================================================================" -ForegroundColor Cyan
+                Write-Host "  📌 INTERACTIVE GIT RESET & UNDO UTILITY                           " -ForegroundColor Yellow
+                Write-Host "====================================================================" -ForegroundColor Cyan
+                Write-Host "  [1] Unstage All Files (Keep modified changes, remove from staging)"
+                Write-Host "  [2] Discard All Uncommitted Local Changes (Revert files to last commit)"
+                Write-Host "  [3] Soft Rollback Last Commit (Undo commit, KEEP changes staged)"
+                Write-Host "  [4] Hard Rollback Last Commit (DESTROY last commit & all changes!)"
+                Write-Host "  [5] Back to Module 2 Menu"
+                Write-Host "====================================================================" -ForegroundColor Cyan
+
+                $resetChoice = Read-Host "Select choice [1-5]"
+
+                if ($resetChoice -eq "1") {
+                    Write-Host "`n--> Unstaging all files..." -ForegroundColor Green
+                    git reset HEAD
+                    Write-Host "[✔] All staged files reverted to unstaged!" -ForegroundColor Green
+                    Pause-Console
+                }
+                elseif ($resetChoice -eq "2") {
+                    $conf = Read-Host "`n[!] ARE YOU SURE? This will DISCARD all uncommitted work! (y/N)"
+                    if ($conf -eq "y" -or $conf -eq "Y") {
+                        git checkout -- . 2>$null
+                        git clean -fd 2>$null
+                        Write-Host "[✔] Local working tree wiped clean to last commit state!" -ForegroundColor Green
+                    }
+                    Pause-Console
+                }
+                elseif ($resetChoice -eq "3") {
+                    Write-Host "`n--> Soft rolling back last commit..." -ForegroundColor Green
+                    git reset --soft HEAD~1
+                    Write-Host "[✔] Commit undone! Your files remain intact in the staging area." -ForegroundColor Green
+                    Pause-Console
+                }
+                elseif ($resetChoice -eq "4") {
+                    $conf = Read-Host "`n[!] CRITICAL WARNING: This will PERMANENTLY ERASE your last commit and work! (y/N)"
+                    if ($conf -eq "y" -or $conf -eq "Y") {
+                        git reset --hard HEAD~1
+                        Write-Host "[✔] Hard reset complete. Last commit and work removed." -ForegroundColor Green
+                    }
+                    Pause-Console
+                }
+                elseif ($resetChoice -eq "5") { break }
+            }
+        }
+        elseif ($choice -eq "5") {
             $branch = (git rev-parse --abbrev-ref HEAD 2>$null)
             if (-not $branch) { $branch = "main" }
 
@@ -120,7 +211,7 @@ function Manage-GitRepo {
             }
             Pause-Console
         }
-        elseif ($choice -eq "4") {
+        elseif ($choice -eq "6") {
             Write-Host "`nSelect template type for .gitignore:" -ForegroundColor Yellow
             Write-Host "  [1] Node.js / React / Next.js"
             Write-Host "  [2] Python / Django / Flask"
@@ -161,6 +252,6 @@ obj/
             }
             Pause-Console
         }
-        elseif ($choice -eq "5") { break }
+        elseif ($choice -eq "7") { break }
     }
 }
