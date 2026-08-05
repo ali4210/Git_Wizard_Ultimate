@@ -23,34 +23,51 @@ function Manage-GitRepo {
             git init
             git branch -M main
             git add .
-            $msg = Read-Host "Enter initial commit message [default: Initial commit]"
-            if (-not $msg) {$msg = "Initial commit" }
-            git commit -m "$msg"
 
-            $remoteUrl = Read-Host "Enter GitHub Remote Repository URL"
+            $status = git status --porcelain
+            if (-not $status) {
+                Write-Host "[i] Working tree clean (nothing new to commit)." -ForegroundColor Yellow
+            } else {
+                $msg = Read-Host "Enter initial commit message [default: Initial commit]"
+                if (-not $msg) { $msg = "Initial commit" }
+                git commit -m "$msg"
+            }
+
+            $rawUrl = Read-Host "Enter GitHub Remote Repository URL"
+            $remoteUrl = Clean-RemoteUrl $rawUrl
+
             if ($remoteUrl) {
                 git remote remove origin 2>$null
                 git remote add origin "$remoteUrl"
-                Write-Host "[✔] Remote attached. Pushing to origin main..." -ForegroundColor Green
+                Write-Host "[✔] Remote attached: $remoteUrl" -ForegroundColor Green
+                Write-Host "--> Pushing to origin main..." -ForegroundColor Green
                 git push -u origin main
             }
             Pause-Console
         }
         elseif ($choice -eq "2") {
             git add .
-            $msg = Read-Host "Enter commit message"
-            if (-not $msg) {
-                Write-Host "[!] Commit message cannot be empty!" -ForegroundColor Red
-                Pause-Console
-                continue
+            $status = git status --porcelain
+            if (-not $status) {
+                Write-Host "[i] Working tree clean (no new changes to commit). Pushing existing commits..." -ForegroundColor Yellow
+            } else {
+                $msg = Read-Host "Enter commit message"
+                if (-not $msg) {
+                    Write-Host "[!] Commit message cannot be empty!" -ForegroundColor Red
+                    Pause-Console
+                    continue
+                }
+                git commit -m "$msg"
             }
-            git commit -m "$msg"
-            $branch = (git rev-parse --abbrev-ref HEAD).Trim()
+            $branch = (git rev-parse --abbrev-ref HEAD 2>$null)
+            if (-not $branch) { $branch = "main" }
             git push origin $branch
             Pause-Console
         }
         elseif ($choice -eq "3") {
-            $branch = (git rev-parse --abbrev-ref HEAD).Trim()
+            $branch = (git rev-parse --abbrev-ref HEAD 2>$null)
+            if (-not $branch) { $branch = "main" }
+
             Write-Host "`n====================================================================" -ForegroundColor Cyan
             Write-Host "  📌 SMART CONFLICT PUSH RESOLVER (Branch: $branch)                " -ForegroundColor Yellow
             Write-Host "====================================================================" -ForegroundColor Cyan

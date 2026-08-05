@@ -28,15 +28,23 @@ pause() {
     read -p "Press [ENTER] to return to menu..."
 }
 
+# --- Clean URL Helper ---
+clean_remote_url() {
+    local input_url="$1"
+    # Strip leading 'git remote add/set-url origin' if user pasted entire command
+    input_url=$(echo "$input_url" | sed -E 's/^git remote (add|set-url) origin //I' | xargs)
+    echo "$input_url"
+}
+
 # --- Module 1: Identity & SSH Manager ---
 manage_identity() {
     while true; do
         show_header
-        echo -e "${YELLOW}${BOLD}[+] Module 1: Identity & SSH Connection Manager${NC}\n"
+        echo -e "${YELLOW}${BOLD}[+] Module 1: Identity, SSH & Remote URL Manager${NC}\n"
         echo -e "  ${GREEN}[1]${NC} Check / Set Global Git User & Email"
         echo -e "  ${GREEN}[2]${NC} Generate New SSH Key (ED25519) & Show Public Key"
         echo -e "  ${GREEN}[3]${NC} Test SSH Connection to GitHub"
-        echo -e "  ${GREEN}[4]${NC} Convert Remote URL between HTTPS and SSH"
+        echo -e "  ${GREEN}[4]${NC} ${BOLD}Inspect & Manage Remote Repository URLs${NC} ${CYAN}(View, Change, Switch HTTPS/SSH)${NC}"
         echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
         read -p "Select choice [1-5]: " ID_CHOICE
@@ -78,35 +86,72 @@ manage_identity() {
             3)
                 echo -e "\n${GREEN}--> Testing SSH connection to GitHub...${NC}"
                 ssh -T git@github.com || true
+                echo -e "\n${GREEN}[i] Note: 'does not provide shell access' is standard and indicates successful authentication!${NC}"
                 pause
                 ;;
             4)
                 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-                    echo -e "\n${RED}[!] Not inside a Git repository!${NC}"
+                    echo -e "\n${RED}[!] Not inside a Git repository! Run Option 1 in Module 2 first.${NC}"
                     pause
                     continue
                 fi
-                CURRENT_URL=$(git remote get-url origin 2>/dev/null || echo "")
-                if [[ -z "$CURRENT_URL" ]]; then
-                    echo -e "\n${RED}[!] No 'origin' remote URL configured.${NC}"
-                    pause
-                    continue
-                fi
-                echo -e "\n${CYAN}Current Remote URL:${NC} $CURRENT_URL"
-                if [[ "$CURRENT_URL" =~ ^https://github.com/(.*)/(.*)\.git$ ]]; then
-                    USER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-                    NEW_URL="git@github.com:${USER_REPO}.git"
-                    git remote set-url origin "$NEW_URL"
-                    echo -e "${GREEN}[✔] Switched remote to SSH: $NEW_URL${NC}"
-                elif [[ "$CURRENT_URL" =~ ^git@github\.com:(.*)/(.*)\.git$ ]]; then
-                    USER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-                    NEW_URL="https://github.com/${USER_REPO}.git"
-                    git remote set-url origin "$NEW_URL"
-                    echo -e "${GREEN}[✔] Switched remote to HTTPS: $NEW_URL${NC}"
-                else
-                    echo -e "${RED}[!] Unrecognized remote URL format.${NC}"
-                fi
-                pause
+
+                while true; do
+                    show_header
+                    echo -e "${YELLOW}${BOLD}📌 REMOTE REPOSITORY URL MANAGER${NC}\n"
+                    echo -e "${CYAN}--- Current Configured Remotes (git remote -v) ---${NC}"
+                    git remote -v 2>/dev/null || echo "No remotes set."
+                    echo -e "-----------------------------------------------------\n"
+                    echo -e "  ${GREEN}[1]${NC} Change / Set New Remote URL (Overwrite Existing)"
+                    echo -e "  ${GREEN}[2]${NC} Toggle Protocol (Switch between HTTPS and SSH)"
+                    echo -e "  ${GREEN}[3]${NC} Back to Module 1 Menu"
+                    read -p "Select choice [1-3]: " REMOTE_CHOICE
+
+                    case $REMOTE_CHOICE in
+                        1)
+                            echo ""
+                            read -p "Enter fresh GitHub Remote URL (HTTPS or SSH): " RAW_URL
+                            NEW_URL=$(clean_remote_url "$RAW_URL")
+                            if [[ -n "$NEW_URL" ]]; then
+                                git remote remove origin 2>/dev/null || true
+                                git remote add origin "$NEW_URL"
+                                echo -e "${GREEN}[✔] Remote 'origin' updated to: $NEW_URL${NC}"
+                            else
+                                echo -e "${RED}[!] URL cannot be empty!${NC}"
+                            fi
+                            pause
+                            ;;
+                        2)
+                            CURRENT_URL=$(git remote get-url origin 2>/dev/null || echo "")
+                            CURRENT_URL=$(clean_remote_url "$CURRENT_URL")
+
+                            if [[ -z "$CURRENT_URL" ]]; then
+                                echo -e "\n${RED}[!] No 'origin' remote set yet. Use Option [1] to set one first.${NC}"
+                                pause
+                                continue
+                            fi
+
+                            git remote set-url origin "$CURRENT_URL" 2>/dev/null || true
+
+                            if [[ "$CURRENT_URL" =~ ^https://github\.com/([^/]+)/([^/]+)(\.git)?$ ]]; then
+                                USER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
+                                CONVERTED_URL="git@github.com:${USER_REPO}.git"
+                                git remote set-url origin "$CONVERTED_URL"
+                                echo -e "${GREEN}[✔] Switched from HTTPS to SSH: $CONVERTED_URL${NC}"
+                            elif [[ "$CURRENT_URL" =~ ^git@github\.com:([^/]+)/([^/]+)(\.git)?$ ]]; then
+                                USER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
+                                CONVERTED_URL="https://github.com/${USER_REPO}.git"
+                                git remote set-url origin "$CONVERTED_URL"
+                                echo -e "${GREEN}[✔] Switched from SSH to HTTPS: $CONVERTED_URL${NC}"
+                            else
+                                echo -e "${RED}[!] Unrecognized URL format. Use Option [1] to re-enter a fresh URL.${NC}"
+                            fi
+                            pause
+                            ;;
+                        3) break ;;
+                        *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
+                    esac
+                done
                 ;;
             5) break ;;
             *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
@@ -133,36 +178,48 @@ manage_repo() {
                 git init
                 git branch -M main
                 git add .
-                read -p "Enter initial commit message [default: Initial commit]: " MSG
-                MSG=${MSG:-"Initial commit"}
-                git commit -m "$MSG"
+                
+                if [[ -z "$(git status --porcelain)" ]]; then
+                    echo -e "${YELLOW}[i] Working tree clean (nothing new to commit).${NC}"
+                else
+                    read -p "Enter initial commit message [default: Initial commit]: " MSG
+                    MSG=${MSG:-"Initial commit"}
+                    git commit -m "$MSG"
+                fi
 
-                read -p "Enter GitHub Remote Repository URL: " REMOTE_URL
+                read -p "Enter GitHub Remote Repository URL: " RAW_URL
+                REMOTE_URL=$(clean_remote_url "$RAW_URL")
+
                 if [[ -n "$REMOTE_URL" ]]; then
                     git remote remove origin 2>/dev/null || true
                     git remote add origin "$REMOTE_URL"
-                    echo -e "${GREEN}[✔] Remote attached. Pushing to origin main...${NC}"
-                    git push -u origin main || echo -e "${YELLOW}[!] Push rejected. Use Option [3] (Smart Conflict Push Resolver) to sync remote changes.${NC}"
+                    echo -e "${GREEN}[✔] Remote attached: $REMOTE_URL${NC}"
+                    echo -e "${GREEN}--> Pushing to origin main...${NC}"
+                    git push -u origin main || echo -e "${YELLOW}[!] Push rejected or refused. Use Option [3] (Smart Conflict Push Resolver) to sync!${NC}"
                 fi
                 pause
                 ;;
             2)
                 git add .
-                read -p "Enter commit message: " MSG
-                if [[ -z "$MSG" ]]; then
-                    echo -e "${RED}Commit message cannot be empty!${NC}"
-                    pause
-                    continue
+                if [[ -z "$(git status --porcelain)" ]]; then
+                    echo -e "${YELLOW}[i] Working tree clean (no new changes to commit). Pushing existing commits...${NC}"
+                else
+                    read -p "Enter commit message: " MSG
+                    if [[ -z "$MSG" ]]; then
+                        echo -e "${RED}Commit message cannot be empty!${NC}"
+                        pause
+                        continue
+                    fi
+                    git commit -m "$MSG"
                 fi
-                git commit -m "$MSG"
-                BRANCH=$(git rev-parse --abbrev-ref HEAD)
+                BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
                 git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [3] to resolve conflicts!${NC}"
                 pause
                 ;;
             3)
                 show_header
                 echo -e "${YELLOW}${BOLD}📌 SMART CONFLICT PUSH RESOLVER Engine${NC}\n"
-                BRANCH=$(git rev-parse --abbrev-ref HEAD)
+                BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
                 echo -e "Current Branch: ${CYAN}$BRANCH${NC}"
                 echo -e "Choose resolution strategy for remote refusal:\n"
                 echo -e "  ${GREEN}[1]${NC} Safe Pull & Rebase ${CYAN}(Recommended: Appends your commits cleanly)${NC}"
@@ -357,7 +414,7 @@ commit_assistant() {
 while true; do
     show_header
     echo -e "Main Capabilities Suite:\n"
-    echo -e "  ${GREEN}[1]${NC} Identity & SSH Manager ${CYAN}(Config, Keys, Connections)${NC}"
+    echo -e "  ${GREEN}[1]${NC} Identity & SSH Manager ${CYAN}(Config, Keys, Connections, Remotes)${NC}"
     echo -e "  ${GREEN}[2]${NC} Repository & Smart Push Engine ${CYAN}(Init, Conflict Resolver, .gitignore)${NC}"
     echo -e "  ${GREEN}[3]${NC} Advanced Branch Manager ${CYAN}(Local/Remote Sync & Dual Delete)${NC}"
     echo -e "  ${GREEN}[4]${NC} Conventional Commit Assistant ${CYAN}(Professional Formatting)${NC}"
