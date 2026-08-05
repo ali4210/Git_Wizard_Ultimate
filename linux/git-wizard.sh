@@ -26,7 +26,7 @@ show_header() {
         chafa --size=35x15 "$IMAGE_PATH"
         echo ""
     else
-        # Fallback ASCII Logo
+        # Fallback ASCII Logo (Custom High-Density Block Art)
         echo -e "${CYAN}${BOLD}"
         cat << "EOF"
                                             @@@@@@@@@@@@                                            
@@ -70,8 +70,6 @@ show_header() {
                              %@@@@@@@@@@@                  @@@@@@@@@@@%                             
                                  @@@@@@@@                  @@@@@@@@                                 
                                      @@@                    @@@
-									 
-								
 EOF
         echo -e "${NC}"
     fi
@@ -80,11 +78,11 @@ EOF
     echo -e "${CYAN}${BOLD}         🧙‍♂️ GIT-WIZARD ULTIMATE - GITHUB WORKFLOW ENGINE           ${NC}"
     echo -e "${CYAN}${BOLD}====================================================================${NC}"
 }
+
 pause() {
     echo ""
     read -p "Press [ENTER] to return to menu..."
 }
-
 
 show_uptodate_celebration() {
     echo -e "${GREEN}${BOLD}"
@@ -111,18 +109,10 @@ EOF
     echo -e "${GREEN}${BOLD}Everything up-to-date! Code is safe and synced on GitHub!${NC}"
 }
 
-
 # --- Clean URL Helper ---
 clean_remote_url() {
     local input_url="$1"
     # Strip leading 'git remote add/set-url origin' if user pasted entire command
-    input_url=$(echo "$input_url" | sed -E 's/^git remote (add|set-url) origin //I' | xargs)
-    echo "$input_url"
-}
-
-# --- Clean URL Helper ---
-clean_remote_url() {
-    local input_url="$1"
     input_url=$(echo "$input_url" | sed -E 's/^git remote (add|set-url) origin //I' | xargs)
     echo "$input_url"
 }
