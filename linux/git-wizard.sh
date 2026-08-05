@@ -18,11 +18,68 @@ NC='\033[0m'
 
 show_header() {
     clear
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    IMAGE_PATH="${SCRIPT_DIR}/assets/octocat.png"
+
+    # Render high-res PNG via chafa if available
+    if command -v chafa &>/dev/null && [[ -f "$IMAGE_PATH" ]]; then
+        chafa --size=35x15 "$IMAGE_PATH"
+        echo ""
+    else
+        # Fallback ASCII Logo
+        echo -e "${CYAN}${BOLD}"
+        cat << "EOF"
+                                            @@@@@@@@@@@@                                            
+                                      @@@@@@@@@@@@@@@@@@@@@@@@@                                     
+                                 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                                 
+                              @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                              
+                           @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                           
+                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                         
+                       @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       
+                      @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      
+                    @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    
+                   @@@@@@@@@@@      @@@@@@@@@@@@@@@@@@@@@@@@@@@@      @@@@@@@@@@@                   
+                  @@@@@@@@@@@          @@@@@@          @@@@@@          @@@@@@@@@@@                  
+                 @@@@@@@@@@@@                                          @@@@@@@@@@@@                 
+                @@@@@@@@@@@@@                                          @@@@@@@@@@@@@                
+               @@@@@@@@@@@@@@                                          @@@@@@@@@@@@@@               
+              @@@@@@@@@@@@@@@@                                        @@@@@@@@@@@@@@@@              
+              @@@@@@@@@@@@@@                                            @@@@@@@@@@@@@@              
+              @@@@@@@@@@@@@                                              @@@@@@@@@@@@@              
+             @@@@@@@@@@@@@@                                               @@@@@@@@@@@@@             
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
+             @@@@@@@@@@@@@@                                              @@@@@@@@@@@@@@             
+             @@@@@@@@@@@@@@                                              @@@@@@@@@@@@@@             
+              @@@@@@@@@@@@@@                                            @@@@@@@@@@@@@@              
+              @@@@@@@@@@@@@@@                                          @@@@@@@@@@@@@@@              
+              @@@@@@@@@@@@@@@@@                                      @@@@@@@@@@@@@@@@@              
+               @@@@@@@@@@@@@@@@@@                                  @@@@@@@@@@@@@@@@@@               
+                @@@@@@@   @@@@@@@@@@                            @@@@@@@@@@@@@@@@@@@@                
+                @@@@@@@@     @@@@@@@@@@@@@@              @@@@@@@@@@@@@@@@@@@@@@@@@@@                
+                  @@@@@@@@    @@@@@@@@@@@                  @@@@@@@@@@@@@@@@@@@@@@@                  
+                   @@@@@@@@     @@@@@@@@@                  @@@@@@@@@@@@@@@@@@@@@@                   
+                    @@@@@@@@                               @@@@@@@@@@@@@@@@@@@@@                    
+                     -@@@@@@@                              @@@@@@@@@@@@@@@@@@@-                     
+                       @@@@@@@@                            @@@@@@@@@@@@@@@@@@                       
+                         @@@@@@@@@@@@@@@@                  @@@@@@@@@@@@@@@@                         
+                           @@@@@@@@@@@@@@                  @@@@@@@@@@@@@@                           
+                             %@@@@@@@@@@@                  @@@@@@@@@@@%                             
+                                 @@@@@@@@                  @@@@@@@@                                 
+                                     @@@                    @@@
+									 
+								
+EOF
+        echo -e "${NC}"
+    fi
+
     echo -e "${CYAN}${BOLD}====================================================================${NC}"
     echo -e "${CYAN}${BOLD}         🧙‍♂️ GIT-WIZARD ULTIMATE - GITHUB WORKFLOW ENGINE           ${NC}"
     echo -e "${CYAN}${BOLD}====================================================================${NC}"
 }
-
 pause() {
     echo ""
     read -p "Press [ENTER] to return to menu..."
@@ -100,7 +157,7 @@ manage_identity() {
                     show_header
                     echo -e "${YELLOW}${BOLD}📌 REMOTE REPOSITORY URL MANAGER${NC}\n"
                     echo -e "${CYAN}--- Current Configured Remotes (git remote -v) ---${NC}"
-                    git remote -v 2>/dev/null || echo "No remotes set."
+                    GIT_PAGER=cat git remote -v 2>/dev/null || echo "No remotes set."
                     echo -e "-----------------------------------------------------\n"
                     echo -e "  ${GREEN}[1]${NC} Change / Set New Remote URL (Overwrite Existing)"
                     echo -e "  ${GREEN}[2]${NC} Toggle Protocol (Switch between HTTPS and SSH)"
@@ -326,24 +383,83 @@ EOF
 }
 
 # --- Module 3: Advanced Branch Manager ---
+
+# --- Interactive Arrow-Key Branch Selector Helper ---
+select_branch_interactive() {
+    local prompt="$1"
+    # FORCE GIT_PAGER=cat to prevent less/q pager popup
+    local branch_list=$(GIT_PAGER=cat git branch --format="%(refname:short)")
+    
+    if [[ -z "$branch_list" ]]; then
+        echo -e "${RED}[!] No local branches found.${NC}"
+        return 1
+    fi
+
+    # Read into array safely
+    local branches=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && branches+=("$line")
+    done <<< "$branch_list"
+
+    local selected=0
+    local key=""
+
+    # Hide cursor
+    tput civis 2>/dev/null || true
+
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}$prompt${NC}\n"
+        echo -e "${CYAN}Use UP/DOWN arrow keys to navigate, press [ENTER] to select:${NC}\n"
+
+        for i in "${!branches[@]}"; do
+            if [[ $i -eq $selected ]]; then
+                echo -e "${GREEN}${BOLD}  ➔  ${branches[$i]} (Selected)${NC}"
+            else
+                echo -e "     ${branches[$i]}"
+            fi
+        done
+        echo -e "\n===================================================================="
+
+        # Read keypress
+        read -rsn1 key
+        if [[ $key == $'\x1b' ]]; then
+            read -rsn2 key
+            if [[ $key == "[A" ]]; then # Up arrow
+                ((selected--))
+                if [[ $selected -lt 0 ]]; then selected=$((${#branches[@]} - 1)); fi
+            elif [[ $key == "[B" ]]; then # Down arrow
+                ((selected++))
+                if [[ $selected -ge ${#branches[@]} ]]; then selected=0; fi
+            fi
+        elif [[ $key == "" ]]; then # Enter key
+            tput cnorm 2>/dev/null || true
+            SELECTED_BRANCH="${branches[$selected]}"
+            return 0
+        fi
+    done
+}
+
 manage_branches() {
     while true; do
         show_header
         echo -e "${YELLOW}${BOLD}[+] Module 3: Advanced Branch & Remote Manager${NC}\n"
         echo -e "  ${GREEN}[1]${NC} List All Branches (Local & Remote)"
         echo -e "  ${GREEN}[2]${NC} Create New Branch & Publish to GitHub"
-        echo -e "  ${GREEN}[3]${NC} Switch Branch"
-        echo -e "  ${GREEN}[4]${NC} Delete Branch (Locally AND from GitHub)"
+        echo -e "  ${GREEN}[3]${NC} Switch Branch ${CYAN}(Interactive Arrow-Key Selection)${NC}"
+        echo -e "  ${GREEN}[4]${NC} Delete Branch ${RED}(Interactive Arrow-Key Selection & Purge)${NC}"
         echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
         read -p "Select choice [1-5]: " B_CHOICE
 
         case $B_CHOICE in
             1)
-                echo -e "\n${CYAN}--- Local Branches ---${NC}"
-                git branch -vv
-                echo -e "\n${CYAN}--- Remote Branches ---${NC}"
-                git branch -r
+                show_header
+                echo -e "${CYAN}${BOLD}--- Local Branches ---${NC}"
+                # FORCE GIT_PAGER=cat here!
+                GIT_PAGER=cat git branch -vv
+                echo -e "\n${CYAN}${BOLD}--- Remote Branches ---${NC}"
+                GIT_PAGER=cat git branch -r
                 pause
                 ;;
             2)
@@ -357,27 +473,24 @@ manage_branches() {
                 pause
                 ;;
             3)
-                echo -e "\nAvailable Local Branches:"
-                git branch --format="%(refname:short)"
-                echo ""
-                read -p "Enter target branch name to switch: " TARGET_B
-                if [[ -n "$TARGET_B" ]]; then
-                    git checkout "$TARGET_B"
+                if select_branch_interactive "📌 SELECT BRANCH TO SWITCH"; then
+                    echo -e "\n${GREEN}--> Switching to branch '$SELECTED_BRANCH'...${NC}"
+                    git checkout "$SELECTED_BRANCH"
                 fi
                 pause
                 ;;
             4)
-                read -p "Enter branch name to PURGE (Delete locally & online): " DEL_B
-                if [[ -n "$DEL_B" ]]; then
+                if select_branch_interactive "📌 SELECT BRANCH TO PURGE (LOCAL & REMOTE)"; then
                     CURRENT_B=$(git rev-parse --abbrev-ref HEAD)
-                    if [[ "$DEL_B" == "$CURRENT_B" ]]; then
-                        echo -e "${RED}[!] Cannot delete active branch. Switch to another branch first!${NC}"
+                    if [[ "$SELECTED_BRANCH" == "$CURRENT_B" ]]; then
+                        echo -e "\n${RED}[!] Cannot delete active branch '$CURRENT_B'. Switch to another branch first!${NC}"
                     else
-                        read -p "Are you SURE you want to delete '$DEL_B' everywhere? (y/N): " CONF
+                        echo ""
+                        read -p "Are you SURE you want to delete '$SELECTED_BRANCH' everywhere? (y/N): " CONF
                         if [[ "$CONF" =~ ^[Yy]$ ]]; then
-                            git branch -D "$DEL_B" 2>/dev/null || true
-                            git push origin --delete "$DEL_B" 2>/dev/null || true
-                            echo -e "${GREEN}[✔] Branch '$DEL_B' purged successfully!${NC}"
+                            git branch -D "$SELECTED_BRANCH" 2>/dev/null || true
+                            git push origin --delete "$SELECTED_BRANCH" 2>/dev/null || true
+                            echo -e "${GREEN}[✔] Branch '$SELECTED_BRANCH' purged successfully!${NC}"
                         fi
                     fi
                 fi
