@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# TOOL NAME:    git-wizard.sh (V1.0 Ultimate Release)
+# AUTHOR:       Saleem (Open Source DevOps/Sec Contributor)
+# DESCRIPTION:  Interactive CLI Suite for Git/GitHub Onboarding & Workflows.
+# COMPATIBILITY: Debian, Ubuntu, Kali Linux, RHEL, CentOS, Fedora, Arch
+# ==============================================================================
+
+set -e
+
+# --- Colors & Formatting ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+show_header() {
+    clear
+    echo -e "${CYAN}${BOLD}====================================================================${NC}"
+    echo -e "${CYAN}${BOLD}         🧙‍♂️ GIT-WIZARD ULTIMATE - GITHUB WORKFLOW ENGINE           ${NC}"
+    echo -e "${CYAN}${BOLD}====================================================================${NC}"
+}
+
+pause() {
+    echo ""
+    read -p "Press [ENTER] to return to menu..."
+}
+
+# --- Module 1: Identity & SSH Manager ---
+manage_identity() {
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}[+] Module 1: Identity & SSH Connection Manager${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} Check / Set Global Git User & Email"
+        echo -e "  ${GREEN}[2]${NC} Generate New SSH Key (ED25519) & Show Public Key"
+        echo -e "  ${GREEN}[3]${NC} Test SSH Connection to GitHub"
+        echo -e "  ${GREEN}[4]${NC} Convert Remote URL between HTTPS and SSH"
+        echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
+        echo -e "\n===================================================================="
+        read -p "Select choice [1-5]: " ID_CHOICE
+
+        case $ID_CHOICE in
+            1)
+                echo -e "\n${CYAN}Current Configuration:${NC}"
+                echo "  Name:  $(git config --global user.name || echo 'Not set')"
+                echo "  Email: $(git config --global user.email || echo 'Not set')"
+                echo ""
+                read -p "Enter new global user.name (press ENTER to skip): " NEW_NAME
+                read -p "Enter new global user.email (press ENTER to skip): " NEW_EMAIL
+
+                if [[ -n "$NEW_NAME" ]]; then
+                    git config --global user.name "$NEW_NAME"
+                    echo -e "${GREEN}[✔] user.name updated to: $NEW_NAME${NC}"
+                fi
+                if [[ -n "$NEW_EMAIL" ]]; then
+                    git config --global user.email "$NEW_EMAIL"
+                    echo -e "${GREEN}[✔] user.email updated to: $NEW_EMAIL${NC}"
+                fi
+                pause
+                ;;
+            2)
+                if [[ -f ~/.ssh/id_ed25519 ]]; then
+                    echo -e "\n${YELLOW}[!] An ED25519 SSH key already exists at ~/.ssh/id_ed25519${NC}"
+                else
+                    echo -e "\n${GREEN}--> Generating ED25519 SSH Key...${NC}"
+                    EMAIL=$(git config --global user.email || echo "user@github.com")
+                    ssh-keygen -t ed25519 -C "$EMAIL" -f ~/.ssh/id_ed25519 -N ""
+                    echo -e "${GREEN}[✔] SSH Key created!${NC}"
+                fi
+                echo -e "\n${CYAN}Your Public Key (Add this to GitHub -> Settings -> SSH Keys):${NC}"
+                echo -e "${YELLOW}--------------------------------------------------------------------${NC}"
+                cat ~/.ssh/id_ed25519.pub
+                echo -e "${YELLOW}--------------------------------------------------------------------${NC}"
+                pause
+                ;;
+            3)
+                echo -e "\n${GREEN}--> Testing SSH connection to GitHub...${NC}"
+                ssh -T git@github.com || true
+                pause
+                ;;
+            4)
+                if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+                    echo -e "\n${RED}[!] Not inside a Git repository!${NC}"
+                    pause
+                    continue
+                fi
+                CURRENT_URL=$(git remote get-url origin 2>/dev/null || echo "")
+                if [[ -z "$CURRENT_URL" ]]; then
+                    echo -e "\n${RED}[!] No 'origin' remote URL configured.${NC}"
+                    pause
+                    continue
+                fi
+                echo -e "\n${CYAN}Current Remote URL:${NC} $CURRENT_URL"
+                if [[ "$CURRENT_URL" =~ ^https://github.com/(.*)/(.*)\.git$ ]]; then
+                    USER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+                    NEW_URL="git@github.com:${USER_REPO}.git"
+                    git remote set-url origin "$NEW_URL"
+                    echo -e "${GREEN}[✔] Switched remote to SSH: $NEW_URL${NC}"
+                elif [[ "$CURRENT_URL" =~ ^git@github\.com:(.*)/(.*)\.git$ ]]; then
+                    USER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+                    NEW_URL="https://github.com/${USER_REPO}.git"
+                    git remote set-url origin "$NEW_URL"
+                    echo -e "${GREEN}[✔] Switched remote to HTTPS: $NEW_URL${NC}"
+                else
+                    echo -e "${RED}[!] Unrecognized remote URL format.${NC}"
+                fi
+                pause
+                ;;
+            5) break ;;
+            *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# --- Module 2: Repository Setup & Push Engine ---
+manage_repo() {
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup & Smart Push Engine${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote)"
+        echo -e "  ${GREEN}[2]${NC} Quick Push (Add All -> Commit -> Push)"
+        echo -e "  ${GREEN}[3]${NC} ${BOLD}Smart Conflict Push Resolver${NC} ${RED}(Fixes Rejected Pushes!)${NC}"
+        echo -e "  ${GREEN}[4]${NC} Generate Tailored .gitignore File"
+        echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
+        echo -e "\n===================================================================="
+        read -p "Select choice [1-5]: " REPO_CHOICE
+
+        case $REPO_CHOICE in
+            1)
+                echo -e "\n${GREEN}--> Initializing Git repository...${NC}"
+                git init
+                git branch -M main
+                git add .
+                read -p "Enter initial commit message [default: Initial commit]: " MSG
+                MSG=${MSG:-"Initial commit"}
+                git commit -m "$MSG"
+
+                read -p "Enter GitHub Remote Repository URL: " REMOTE_URL
+                if [[ -n "$REMOTE_URL" ]]; then
+                    git remote remove origin 2>/dev/null || true
+                    git remote add origin "$REMOTE_URL"
+                    echo -e "${GREEN}[✔] Remote attached. Pushing to origin main...${NC}"
+                    git push -u origin main || echo -e "${YELLOW}[!] Push rejected. Use Option [3] (Smart Conflict Push Resolver) to sync remote changes.${NC}"
+                fi
+                pause
+                ;;
+            2)
+                git add .
+                read -p "Enter commit message: " MSG
+                if [[ -z "$MSG" ]]; then
+                    echo -e "${RED}Commit message cannot be empty!${NC}"
+                    pause
+                    continue
+                fi
+                git commit -m "$MSG"
+                BRANCH=$(git rev-parse --abbrev-ref HEAD)
+                git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [3] to resolve conflicts!${NC}"
+                pause
+                ;;
+            3)
+                show_header
+                echo -e "${YELLOW}${BOLD}📌 SMART CONFLICT PUSH RESOLVER Engine${NC}\n"
+                BRANCH=$(git rev-parse --abbrev-ref HEAD)
+                echo -e "Current Branch: ${CYAN}$BRANCH${NC}"
+                echo -e "Choose resolution strategy for remote refusal:\n"
+                echo -e "  ${GREEN}[1]${NC} Safe Pull & Rebase ${CYAN}(Recommended: Appends your commits cleanly)${NC}"
+                echo -e "  ${GREEN}[2]${NC} Safe Pull & Merge ${CYAN}(Allows unrelated histories merge)${NC}"
+                echo -e "  ${RED}[3]${NC} Force Push ${RED}(Overwrites remote with your local code)${NC}"
+                echo -e "  ${GREEN}[4]${NC} Cancel"
+                read -p "Select strategy [1-4]: " STRAT
+
+                case $STRAT in
+                    1)
+                        echo -e "\n${GREEN}--> Pulling remote changes with Rebase...${NC}"
+                        git pull origin "$BRANCH" --rebase
+                        git push origin "$BRANCH"
+                        echo -e "${GREEN}[✔] Successfully synced and pushed!${NC}"
+                        ;;
+                    2)
+                        echo -e "\n${GREEN}--> Pulling remote changes with Merge...${NC}"
+                        git pull origin "$BRANCH" --rebase=false --allow-unrelated-histories
+                        git push origin "$BRANCH"
+                        echo -e "${GREEN}[✔] Successfully merged and pushed!${NC}"
+                        ;;
+                    3)
+                        echo -e "\n${RED}--> Force pushing to remote...${NC}"
+                        git push origin "$BRANCH" --force
+                        echo -e "${GREEN}[✔] Force push complete!${NC}"
+                        ;;
+                    *) echo "Cancelled." ;;
+                esac
+                pause
+                ;;
+            4)
+                echo -e "\nSelect template type for .gitignore:"
+                echo -e "  [1] Python / Django / Flask"
+                echo -e "  [2] Node.js / React / Next.js"
+                echo -e "  [3] Go / Docker / Linux"
+                read -p "Choice [1-3]: " GI_CHOICE
+                case $GI_CHOICE in
+                    1)
+                        cat <<EOF > .gitignore
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+.pytest_cache/
+EOF
+                        echo -e "${GREEN}[✔] Python .gitignore created!${NC}"
+                        ;;
+                    2)
+                        cat <<EOF > .gitignore
+node_modules/
+build/
+dist/
+.env
+.env.local
+npm-debug.log*
+EOF
+                        echo -e "${GREEN}[✔] Node.js .gitignore created!${NC}"
+                        ;;
+                    3)
+                        cat <<EOF > .gitignore
+*.exe
+*.o
+*.so
+bin/
+.env
+*.tar.gz
+EOF
+                        echo -e "${GREEN}[✔] Go/Linux .gitignore created!${NC}"
+                        ;;
+                esac
+                pause
+                ;;
+            5) break ;;
+            *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# --- Module 3: Advanced Branch Manager ---
+manage_branches() {
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}[+] Module 3: Advanced Branch & Remote Manager${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} List All Branches (Local & Remote)"
+        echo -e "  ${GREEN}[2]${NC} Create New Branch & Publish to GitHub"
+        echo -e "  ${GREEN}[3]${NC} Switch Branch"
+        echo -e "  ${GREEN}[4]${NC} Delete Branch (Locally AND from GitHub)"
+        echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
+        echo -e "\n===================================================================="
+        read -p "Select choice [1-5]: " B_CHOICE
+
+        case $B_CHOICE in
+            1)
+                echo -e "\n${CYAN}--- Local Branches ---${NC}"
+                git branch -vv
+                echo -e "\n${CYAN}--- Remote Branches ---${NC}"
+                git branch -r
+                pause
+                ;;
+            2)
+                read -p "Enter new branch name: " NEW_B
+                if [[ -n "$NEW_B" ]]; then
+                    git checkout -b "$NEW_B"
+                    echo -e "${GREEN}--> Publishing '$NEW_B' to GitHub...${NC}"
+                    git push -u origin "$NEW_B"
+                    echo -e "${GREEN}[✔] Branch created and tracked on GitHub!${NC}"
+                fi
+                pause
+                ;;
+            3)
+                echo -e "\nAvailable Local Branches:"
+                git branch --format="%(refname:short)"
+                echo ""
+                read -p "Enter target branch name to switch: " TARGET_B
+                if [[ -n "$TARGET_B" ]]; then
+                    git checkout "$TARGET_B"
+                fi
+                pause
+                ;;
+            4)
+                read -p "Enter branch name to PURGE (Delete locally & online): " DEL_B
+                if [[ -n "$DEL_B" ]]; then
+                    CURRENT_B=$(git rev-parse --abbrev-ref HEAD)
+                    if [[ "$DEL_B" == "$CURRENT_B" ]]; then
+                        echo -e "${RED}[!] Cannot delete active branch. Switch to another branch first!${NC}"
+                    else
+                        read -p "Are you SURE you want to delete '$DEL_B' everywhere? (y/N): " CONF
+                        if [[ "$CONF" =~ ^[Yy]$ ]]; then
+                            git branch -D "$DEL_B" 2>/dev/null || true
+                            git push origin --delete "$DEL_B" 2>/dev/null || true
+                            echo -e "${GREEN}[✔] Branch '$DEL_B' purged successfully!${NC}"
+                        fi
+                    fi
+                fi
+                pause
+                ;;
+            5) break ;;
+            *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# --- Module 4: Conventional Commit Assistant ---
+commit_assistant() {
+    show_header
+    echo -e "${YELLOW}${BOLD}[+] Module 4: Conventional Commit Crafting Assistant${NC}\n"
+    echo -e "Select commit classification:"
+    echo -e "  ${GREEN}[1] feat:${NC}     A new feature for users"
+    echo -e "  ${GREEN}[2] fix:${NC}      A bug fix"
+    echo -e "  ${GREEN}[3] docs:${NC}     Documentation changes only"
+    echo -e "  ${GREEN}[4] refactor:${NC} Code restructuring without logic change"
+    echo -e "  ${GREEN}[5] chore:${NC}    Build process or dependency updates"
+    read -p "Select choice [1-5]: " C_TYPE
+
+    PREFIX=""
+    case $C_TYPE in
+        1) PREFIX="feat" ;;
+        2) PREFIX="fix" ;;
+        3) PREFIX="docs" ;;
+        4) PREFIX="refactor" ;;
+        5) PREFIX="chore" ;;
+        *) echo "Cancelled."; return ;;
+    esac
+
+    read -p "Enter short scope (optional, e.g. auth, api): " SCOPE
+    read -p "Enter clear commit description: " DESC
+
+    if [[ -z "$DESC" ]]; then
+        echo -e "${RED}Description required!${NC}"
+        pause
+        return
+    fi
+
+    if [[ -n "$SCOPE" ]]; then
+        FINAL_MSG="${PREFIX}(${SCOPE}): ${DESC}"
+    else
+        FINAL_MSG="${PREFIX}: ${DESC}"
+    fi
+
+    echo -e "\n${CYAN}Crafted Commit Message:${NC} ${BOLD}$FINAL_MSG${NC}"
+    read -p "Execute commit now? (y/N): " DO_COMMIT
+    if [[ "$DO_COMMIT" =~ ^[Yy]$ ]]; then
+        git add .
+        git commit -m "$FINAL_MSG"
+        echo -e "${GREEN}[✔] Conventional commit created!${NC}"
+    fi
+    pause
+}
+
+# --- Main Master Loop ---
+while true; do
+    show_header
+    echo -e "Main Capabilities Suite:\n"
+    echo -e "  ${GREEN}[1]${NC} Identity & SSH Manager ${CYAN}(Config, Keys, Connections)${NC}"
+    echo -e "  ${GREEN}[2]${NC} Repository & Smart Push Engine ${CYAN}(Init, Conflict Resolver, .gitignore)${NC}"
+    echo -e "  ${GREEN}[3]${NC} Advanced Branch Manager ${CYAN}(Local/Remote Sync & Dual Delete)${NC}"
+    echo -e "  ${GREEN}[4]${NC} Conventional Commit Assistant ${CYAN}(Professional Formatting)${NC}"
+    echo -e "  ${GREEN}[5]${NC} Exit"
+    echo -e "\n===================================================================="
+    read -p "Enter choice [1-5]: " MAIN_CHOICE
+
+    case $MAIN_CHOICE in
+        1) manage_identity ;;
+        2) manage_repo ;;
+        3) manage_branches ;;
+        4) commit_assistant ;;
+        5) echo -e "\n${GREEN}Keep building amazing open-source software! Goodbye!${NC}"; exit 0 ;;
+        *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
+    esac
+done
