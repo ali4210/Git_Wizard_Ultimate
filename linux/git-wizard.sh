@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# TOOL NAME:    git-wizard.sh (V1.1 Enhanced Release)
+# TOOL NAME:    git-wizard.sh (Universal Global CLI Edition V1.2)
 # AUTHOR:       Saleem (Open Source DevOps/Sec Contributor)
 # DESCRIPTION:  Interactive CLI Suite for Git/GitHub Onboarding & Workflows.
 # COMPATIBILITY: Debian, Ubuntu, Kali Linux, RHEL, CentOS, Fedora, Arch
 # ==============================================================================
 
 set -e
+
+# Target repository is ALWAYS the current directory where the command was executed
+TARGET_REPO_DIR="$(pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # --- Colors & Formatting ---
 RED='\033[0;31m'
@@ -18,7 +22,6 @@ NC='\033[0m'
 
 show_header() {
     clear
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     IMAGE_PATH="${SCRIPT_DIR}/assets/octocat.png"
 
     # Render high-res PNG via chafa if available
@@ -26,7 +29,7 @@ show_header() {
         chafa --size=35x15 "$IMAGE_PATH"
         echo ""
     else
-        # Fallback ASCII Logo (Custom High-Density Block Art)
+        # Fallback ASCII Logo
         echo -e "${CYAN}${BOLD}"
         cat << "EOF"
                                             @@@@@@@@@@@@                                            
@@ -77,6 +80,7 @@ EOF
     echo -e "${CYAN}${BOLD}====================================================================${NC}"
     echo -e "${CYAN}${BOLD}         🧙‍♂️ GIT-WIZARD ULTIMATE - GITHUB WORKFLOW ENGINE           ${NC}"
     echo -e "${CYAN}${BOLD}====================================================================${NC}"
+    echo -e "${YELLOW}Active Repository Context:${NC} ${BOLD}${TARGET_REPO_DIR}${NC}\n"
 }
 
 pause() {
@@ -112,9 +116,60 @@ EOF
 # --- Clean URL Helper ---
 clean_remote_url() {
     local input_url="$1"
-    # Strip leading 'git remote add/set-url origin' if user pasted entire command
     input_url=$(echo "$input_url" | sed -E 's/^git remote (add|set-url) origin //I' | xargs)
     echo "$input_url"
+}
+
+# --- Non-Git Repository Verification & Setup ---
+check_git_repo() {
+    if ! git -C "$TARGET_REPO_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        show_header
+        echo -e "${RED}[!] WARNING: '${TARGET_REPO_DIR}' is NOT a Git repository!${NC}\n"
+        echo -e "${CYAN}Available Actions:${NC}"
+        echo -e "  ${GREEN}[1]${NC} Initialize a new Git Repository here (${BOLD}git init${NC})"
+        echo -e "  ${YELLOW}${BOLD}[2] ⚡ Enable Universal Global CLI (Install 'git-wizard' system-wide)${NC}"
+        echo -e "  ${GREEN}[3]${NC} Exit"
+        echo -e "\n===================================================================="
+        read -p "Select choice [1-3]: " NON_REPO_CHOICE
+
+        case $NON_REPO_CHOICE in
+            1)
+                git -C "$TARGET_REPO_DIR" init
+                git -C "$TARGET_REPO_DIR" branch -M main 2>/dev/null || true
+                echo -e "${GREEN}[✔] Initialized empty Git repository in ${TARGET_REPO_DIR}!${NC}"
+                pause
+                ;;
+            2) enable_global_cli ;;
+            3) exit 0 ;;
+            *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+        esac
+    fi
+}
+
+# --- Module: Global CLI Installer ---
+enable_global_cli() {
+    show_header
+    echo -e "${YELLOW}${BOLD}⚡ MODULE: UNIVERSAL GLOBAL CLI INSTALLER${NC}\n"
+    echo -e "${CYAN}--> Linking 'git-wizard' into system path (/usr/local/bin/git-wizard)...${NC}\n"
+
+    local SCRIPT_PATH="${SCRIPT_DIR}/linux/git-wizard.sh"
+    chmod +x "$SCRIPT_PATH"
+
+    if [[ -w "/usr/local/bin" ]]; then
+        ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard
+    else
+        echo -e "${CYAN}--> Requesting root permission to link binary into /usr/local/bin/git-wizard...${NC}"
+        sudo ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard
+    fi
+
+    echo -e "\n===================================================================="
+    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON YOUR SYSTEM!${NC}"
+    echo -e "===================================================================="
+    echo -e "${CYAN}📌 HOW TO USE FROM ANY REPOSITORY:${NC}"
+    echo -e "  1. Open ANY terminal and 'cd' into ANY project on your computer."
+    echo -e "  2. Simply type: ${GREEN}${BOLD}git-wizard${NC}"
+    echo -e "====================================================================\n"
+    pause
 }
 
 # --- Module 1: Identity & SSH Manager ---
@@ -171,12 +226,6 @@ manage_identity() {
                 pause
                 ;;
             4)
-                if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-                    echo -e "\n${RED}[!] Not inside a Git repository! Run Option 1 in Module 2 first.${NC}"
-                    pause
-                    continue
-                fi
-
                 while true; do
                     show_header
                     echo -e "${YELLOW}${BOLD}📌 REMOTE REPOSITORY URL MANAGER${NC}\n"
@@ -271,7 +320,6 @@ manage_repo() {
                     git commit -m "$MSG"
                 fi
 
-                # --- Guideline & Remote Detection Banner ---
                 EXISTING_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
                 echo -e "\n${CYAN}====================================================================${NC}"
                 echo -e "${CYAN}${BOLD}📌 GITHUB REMOTE URL SETUP GUIDELINE${NC}"
@@ -329,18 +377,14 @@ manage_repo() {
             3)
                 show_header
                 echo -e "${YELLOW}${BOLD}📌 WORKING DIRECTORY & STAGING STATUS${NC}\n"
-                if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-                    echo -e "${RED}[!] Not inside a Git repository! Run Option [1] first.${NC}"
+                BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+                echo -e "Current Active Branch: ${CYAN}$BRANCH${NC}\n"
+                
+                STATUS_OUT=$(git status --porcelain)
+                if [[ -z "$STATUS_OUT" ]]; then
+                    show_uptodate_celebration
                 else
-                    BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-                    echo -e "Current Active Branch: ${CYAN}$BRANCH${NC}\n"
-                    
-                    STATUS_OUT=$(git status --porcelain)
-                    if [[ -z "$STATUS_OUT" ]]; then
-                        show_uptodate_celebration
-                    else
-                        GIT_PAGER=cat git status
-                    fi
+                    GIT_PAGER=cat git status
                 fi
                 pause
                 ;;
@@ -393,7 +437,7 @@ manage_repo() {
                 ;;
             5)
                 show_header
-                echo -e "${YELLOW}${BOLD}📌 SMART CONFLICT PUSH RESOLVER Engine${NC}\n"
+                echo -e "${YELLOW}${BOLD}📌 SMART CONFLICT PUSH RESOLVER ENGINE${NC}\n"
                 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
                 echo -e "Current Branch: ${CYAN}$BRANCH${NC}"
                 echo -e "Choose resolution strategy for remote refusal:\n"
@@ -636,22 +680,25 @@ commit_assistant() {
 
 # --- Main Master Loop ---
 while true; do
+    check_git_repo
     show_header
     echo -e "Main Capabilities Suite:\n"
     echo -e "  ${GREEN}[1]${NC} Identity & SSH Manager ${CYAN}(Config, Keys, Connections, Remotes)${NC}"
     echo -e "  ${GREEN}[2]${NC} Repository & Smart Push Engine ${CYAN}(Init, Status, Reset, Conflict Resolver)${NC}"
     echo -e "  ${GREEN}[3]${NC} Advanced Branch Manager ${CYAN}(Local/Remote Sync & Dual Delete)${NC}"
     echo -e "  ${GREEN}[4]${NC} Conventional Commit Assistant ${CYAN}(Professional Formatting)${NC}"
-    echo -e "  ${GREEN}[5]${NC} Exit"
+    echo -e "  ${YELLOW}${BOLD}[5] ⚡ Enable Universal Global CLI (Run 'git-wizard' from ANY Folder)${NC}"
+    echo -e "  ${GREEN}[6]${NC} Exit"
     echo -e "\n===================================================================="
-    read -p "Enter choice [1-5]: " MAIN_CHOICE
+    read -p "Enter choice [1-6]: " MAIN_CHOICE
 
     case $MAIN_CHOICE in
         1) manage_identity ;;
         2) manage_repo ;;
         3) manage_branches ;;
         4) commit_assistant ;;
-        5) echo -e "\n${GREEN}Keep building amazing open-source software! Goodbye!${NC}"; exit 0 ;;
+        5) enable_global_cli ;;
+        6) echo -e "\n${GREEN}Keep building amazing open-source software! Goodbye!${NC}"; exit 0 ;;
         *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
     esac
 done
