@@ -67,4 +67,3 @@ You now have a complete, production-ready, modular cross-platform codebase for *
 
 Test it on both your Linux terminal (`./autorun.sh`) and Windows machine (`autorun.bat`), commit it to your GitHub repository, and let me know if you want to add any extra features!
 
-Test remote edit
