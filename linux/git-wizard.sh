@@ -165,7 +165,7 @@ manage_repo() {
         show_header
         echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup & Smart Push Engine${NC}"
         echo -e "${CYAN}💡 Hint: Use Module 1 first if you need to configure your SSH keys or global user info.${NC}\n"
-        echo -e "  ${GREEN}[1]${NC} 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote)"
+        echo -e "  ${GREEN}[1]${NC} 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote, Push)"
         echo -e "  ${GREEN}[2]${NC} Quick Push (Add All -> Commit -> Push)"
         echo -e "  ${GREEN}[3]${NC} ${BOLD}Smart Conflict Push Resolver${NC} ${RED}(Fixes Rejected Pushes!)${NC}"
         echo -e "  ${GREEN}[4]${NC} Generate Tailored .gitignore File"

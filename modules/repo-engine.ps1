@@ -9,7 +9,7 @@ function Manage-GitRepo {
         Write-Host "====================================================================" -ForegroundColor Cyan
         Write-Host "  [+] Module 2: Repository Setup & Smart Push Engine (Windows)     " -ForegroundColor Yellow
         Write-Host "====================================================================" -ForegroundColor Cyan
-        Write-Host "  [1] 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote)"
+        Write-Host "  [1] 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote, Push)"
         Write-Host "  [2] Quick Push (Add All -> Commit -> Push)"
         Write-Host "  [3] Smart Conflict Push Resolver (Fixes Refused Pushes!)"
         Write-Host "  [4] Generate Tailored .gitignore File"
