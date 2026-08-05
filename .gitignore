@@ -1,0 +1,6 @@
+*.exe
+*.o
+*.so
+bin/
+.env
+*.tar.gz
