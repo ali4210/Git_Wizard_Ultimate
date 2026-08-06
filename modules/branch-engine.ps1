@@ -1,114 +1,128 @@
 # ==============================================================================
-# MODULE:       branch-engine.ps1
-# DESCRIPTION:  Handles Local & Remote Branch Management.
+# ENGINE NAME: branch-engine.ps1 (PowerShell 5.1 Interactive Arrow-Key Edition)
 # ==============================================================================
 
-# Force environment variable to disable git pager globally in session
-$env:GIT_PAGER = "cat"
+function Select-BranchInteractive ($menuTitle) {
+    # Get clean local branch list
+    $rawBranches = git branch --format="%(refname:short)" 2>$null
+    if (-not $rawBranches) {
+        Write-Host "[!] No local branches found in this repository." -ForegroundColor Red
+        return $null
+    }
 
-function Select-BranchInteractive ($prompt) {
-    $branches = git branch --format="%(refname:short)"
-    if (-not $branches) {
+    $branches = @($rawBranches)
+    if ($branches.Count -eq 0) {
         Write-Host "[!] No local branches found." -ForegroundColor Red
         return $null
     }
 
-    # Ensure array format if single branch exists
-    $branchArray = @($branches)
+    $selectedIndex = 0
+    $running = $true
 
-    $selected = 0
-    while ($true) {
-        Clear-Host
-        Write-Host "====================================================================" -ForegroundColor Cyan
-        Write-Host "  $prompt" -ForegroundColor Yellow
-        Write-Host "====================================================================" -ForegroundColor Cyan
-        Write-Host "Use UP/DOWN arrow keys to navigate, press [ENTER] to select:`n" -ForegroundColor Cyan
+    while ($running) {
+        Show-Header
+        Write-Host "  $menuTitle`n" -ForegroundColor Yellow
+        Write-Host "Use UP/DOWN Arrow keys to navigate, press [ENTER] to select:`n" -ForegroundColor Cyan
 
-        for ($i = 0; $i -lt $branchArray.Count; $i++) {
-            if ($i -eq $selected) {
-                Write-Host "  ➔  $($branchArray[$i]) (Selected)" -ForegroundColor Green
+        for ($i = 0; $i -lt $branches.Count; $i++) {
+            if ($i -eq $selectedIndex) {
+                Write-Host "  ->  $($branches[$i]) (Selected)" -ForegroundColor Green
             } else {
-                Write-Host "     $($branchArray[$i])"
+                Write-Host "      $($branches[$i])" -ForegroundColor Gray
             }
         }
         Write-Host "`n====================================================================" -ForegroundColor Cyan
 
+        # Capture single keypress
         $key = [Console]::ReadKey($true)
-        if ($key.Key -eq "UpArrow") {
-            $selected--
-            if ($selected -lt 0) { $selected = $branchArray.Count - 1 }
+
+        switch ($key.Key) {
+            "UpArrow" {
+                $selectedIndex--
+                if ($selectedIndex -lt 0) { $selectedIndex = $branches.Count - 1 }
+            }
+            "DownArrow" {
+                $selectedIndex++
+                if ($selectedIndex -ge $branches.Count) { $selectedIndex = 0 }
+            }
+            "Enter" {
+                return $branches[$selectedIndex]
+            }
+            "Escape" {
+                return $null
+            }
         }
-        elseif ($key.Key -eq "DownArrow") {
-            $selected++
-            if ($selected -ge $branchArray.Count) { $selected = 0 }
-        }
-        elseif ($key.Key -eq "Enter") {
-            return $branchArray[$selected].Trim()
+    }
+}
+
+function Manage-Branches {
+    while ($true) {
+        Show-Header
+        Write-Host "  [+] Module 3: Advanced Branch and Remote Manager`n" -ForegroundColor Yellow
+        Write-Host "  [1] List All Branches (Local and Remote)" -ForegroundColor Green
+        Write-Host "  [2] Create New Branch and Publish to GitHub" -ForegroundColor Green
+        Write-Host "  [3] Switch Branch (Interactive Arrow-Key Selection)" -ForegroundColor Green
+        Write-Host "  [4] Delete Branch (Interactive Arrow-Key Selection and Purge)" -ForegroundColor Green
+        Write-Host "  [5] Back to Main Menu" -ForegroundColor Green
+        Write-Host "`n====================================================================" -ForegroundColor Cyan
+
+        $choice = Read-Host "Select choice [1-5]"
+
+        switch ($choice) {
+            "1" {
+                Show-Header
+                Write-Host "--- Local Branches ---" -ForegroundColor Cyan
+                git branch -vv
+                Write-Host "`n--- Remote Branches ---" -ForegroundColor Cyan
+                git branch -r
+                Pause-Console
+            }
+            "2" {
+                $newB = Read-Host "Enter new branch name"
+                if ($newB) {
+                    git checkout -b "$newB"
+                    Write-Host "--> Publishing '$newB' to GitHub..." -ForegroundColor Green
+                    git push -u origin "$newB"
+                    Write-Host "[+] Branch created and tracked on GitHub!" -ForegroundColor Green
+                }
+                Pause-Console
+            }
+            "3" {
+                $selectedBranch = Select-BranchInteractive "SELECT BRANCH TO SWITCH"
+                if ($selectedBranch) {
+                    Write-Host "`n--> Switching to branch '$selectedBranch'..." -ForegroundColor Green
+                    git checkout "$selectedBranch"
+                } else {
+                    Write-Host "`nBranch selection cancelled." -ForegroundColor Yellow
+                }
+                Pause-Console
+            }
+            "4" {
+                $selectedBranch = Select-BranchInteractive "SELECT BRANCH TO PURGE (LOCAL AND REMOTE)"
+                if ($selectedBranch) {
+                    $curB = git rev-parse --abbrev-ref HEAD 2>$null
+                    if ($selectedBranch -eq $curB) {
+                        Write-Host "`n[!] Cannot delete active branch '$curB'! Switch to another branch first." -ForegroundColor Red
+                    } else {
+                        Write-Host ""
+                        $conf = Read-Host "Are you SURE you want to delete '$selectedBranch' everywhere? (y/N)"
+                        if ($conf -eq "y" -or $conf -eq "Y") {
+                            git branch -D "$selectedBranch" 2>$null
+                            git push origin --delete "$selectedBranch" 2>$null
+                            Write-Host "[+] Branch '$selectedBranch' purged successfully!" -ForegroundColor Green
+                        }
+                    }
+                } else {
+                    Write-Host "`nBranch deletion cancelled." -ForegroundColor Yellow
+                }
+                Pause-Console
+            }
+            "5" { return }
+            default { Write-Host "Invalid selection!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
         }
     }
 }
 
 function Manage-GitBranches {
-    # Ensure GIT_PAGER=cat is enforced
-    $env:GIT_PAGER = "cat"
-
-    while ($true) {
-        Clear-Host
-        Write-Host "====================================================================" -ForegroundColor Cyan
-        Write-Host "  [+] Module 3: Advanced Branch & Remote Manager (Windows)         " -ForegroundColor Yellow
-        Write-Host "====================================================================" -ForegroundColor Cyan
-        Write-Host "  [1] List All Branches (Local & Remote)"
-        Write-Host "  [2] Create New Branch & Publish to GitHub"
-        Write-Host "  [3] Switch Branch (Interactive Arrow-Key Selection)"
-        Write-Host "  [4] Delete Branch (Interactive Arrow-Key Selection & Purge)"
-        Write-Host "  [5] Back to Main Menu"
-        Write-Host "====================================================================" -ForegroundColor Cyan
-
-        $choice = Read-Host "Select choice [1-5]"
-
-        if ($choice -eq "1") {
-            Clear-Host
-            Write-Host "--- Local Branches ---" -ForegroundColor Cyan
-            git branch -vv
-            Write-Host "`n--- Remote Branches ---" -ForegroundColor Cyan
-            git branch -r
-            Pause-Console
-        }
-        elseif ($choice -eq "2") {
-            $newB = Read-Host "Enter new branch name"
-            if ($newB) {
-                git checkout -b "$newB"
-                Write-Host "--> Publishing '$newB' to GitHub..." -ForegroundColor Green
-                git push -u origin "$newB"
-                Write-Host "[✔] Branch created and tracked on GitHub!" -ForegroundColor Green
-            }
-            Pause-Console
-        }
-        elseif ($choice -eq "3") {
-            $targetB = Select-BranchInteractive "📌 SELECT BRANCH TO SWITCH"
-            if ($targetB) {
-                Write-Host "`n--> Switching to branch '$targetB'..." -ForegroundColor Green
-                git checkout "$targetB"
-            }
-            Pause-Console
-        }
-        elseif ($choice -eq "4") {
-            $delB = Select-BranchInteractive "📌 SELECT BRANCH TO PURGE (LOCAL & REMOTE)"
-            if ($delB) {
-                $currentB = (git rev-parse --abbrev-ref HEAD 2>$null).Trim()
-                if ($delB -eq $currentB) {
-                    Write-Host "`n[!] Cannot delete active branch '$currentB'. Switch to another branch first!" -ForegroundColor Red
-                } else {
-                    $conf = Read-Host "`nAre you SURE you want to delete '$delB' everywhere? (y/N)"
-                    if ($conf -eq "y" -or $conf -eq "Y") {
-                        git branch -D "$delB" 2>$null
-                        git push origin --delete "$delB" 2>$null
-                        Write-Host "[✔] Branch '$delB' purged successfully!" -ForegroundColor Green
-                    }
-                }
-            }
-            Pause-Console
-        }
-        elseif ($choice -eq "5") { break }
-    }
+    Manage-Branches
 }

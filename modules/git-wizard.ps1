@@ -5,7 +5,7 @@
 #               dynamic repository binding and 1-click Global CLI installer.
 # ==============================================================================
 
-# Force GIT_PAGER=cat globally in session to prevent pager prompts (less/more)
+# Force GIT_PAGER=cat globally in session to prevent pager prompts
 $env:GIT_PAGER = "cat"
 
 # Locate Script Directory & File Path
@@ -110,7 +110,7 @@ function Test-GitRepository {
         Write-Host "[!] WARNING: '$TargetRepoDir' is NOT a Git repository!`n" -ForegroundColor Red
         Write-Host "Available Actions:" -ForegroundColor Cyan
         Write-Host "  [1] Initialize a new Git Repository here (git init)" -ForegroundColor Green
-        Write-Host "  [2] ⚡ Enable Universal Global CLI (Install 'git-wizard' system-wide)" -ForegroundColor Yellow
+        Write-Host "  [2] Enable Universal Global CLI (Install 'git-wizard' system-wide)" -ForegroundColor Yellow
         Write-Host "  [3] Exit" -ForegroundColor Green
         Write-Host "`n====================================================================" -ForegroundColor Cyan
         
@@ -132,7 +132,7 @@ function Test-GitRepository {
 # --- Enable Universal Global CLI for Windows ---
 function Enable-GlobalPowerShellCLI {
     Show-Header
-    Write-Host "⚡ UNIVERSAL GLOBAL CLI INSTALLER FOR WINDOWS`n" -ForegroundColor Yellow
+    Write-Host "UNIVERSAL GLOBAL CLI INSTALLER FOR WINDOWS`n" -ForegroundColor Yellow
     Write-Host "--> Configuring PowerShell Profile for global 'git-wizard' execution..." -ForegroundColor Cyan
 
     # Ensure Profile exists
@@ -140,19 +140,14 @@ function Enable-GlobalPowerShellCLI {
         New-Item -Path $PROFILE -Type File -Force | Out-Null
     }
 
-    $GlobalFunctionConfig = @"
+    $ProfilePath = $PROFILE
+    $GlobalFunctionConfig = "function git-wizard { powershell.exe -ExecutionPolicy Bypass -File '$TargetPs1Path' }"
 
-# --- Git-Wizard Ultimate Global Shortcut ---
-function git-wizard {
-    powershell.exe -ExecutionPolicy Bypass -File "$TargetPs1Path"
-}
-"@
-
-    if (-not (Get-Content $PROFILE -ErrorAction SilentlyContinue | Select-String "function git-wizard")) {
-        Add-Content -Path $PROFILE -Value $GlobalFunctionConfig
-        Write-Host "`n[✔] 'git-wizard' function added to your PowerShell `$PROFILE!" -ForegroundColor Green
+    if (-not (Get-Content -Path $ProfilePath -ErrorAction SilentlyContinue | Select-String -Pattern "function git-wizard")) {
+        Add-Content -Path $ProfilePath -Value "`n# --- Git-Wizard Ultimate Global Shortcut ---`n$GlobalFunctionConfig"
+        Write-Host "`n[✔] 'git-wizard' function added to your PowerShell Profile!" -ForegroundColor Green
     } else {
-        Write-Host "`n[✔] 'git-wizard' is already configured in your PowerShell `$PROFILE." -ForegroundColor Green
+        Write-Host "`n[✔] 'git-wizard' is already configured in your PowerShell Profile." -ForegroundColor Green
     }
 
     Write-Host "`n====================================================================" -ForegroundColor Cyan
@@ -170,11 +165,11 @@ while ($true) {
     Test-GitRepository
     Show-Header
     Write-Host "Main Capabilities Suite:`n" -ForegroundColor Yellow
-    Write-Host "  [1] Identity & SSH Manager (Config, Keys, Connections, Remotes)" -ForegroundColor Green
-    Write-Host "  [2] Repository & Smart Push Engine (Init, Status, Reset, Conflict Resolver)" -ForegroundColor Green
-    Write-Host "  [3] Advanced Branch Manager (Local/Remote Sync & Dual Delete)" -ForegroundColor Green
+    Write-Host "  [1] Identity and SSH Manager (Config, Keys, Connections, Remotes)" -ForegroundColor Green
+    Write-Host "  [2] Repository and Smart Push Engine (Init, Status, Reset, Conflict Resolver)" -ForegroundColor Green
+    Write-Host "  [3] Advanced Branch Manager (Local/Remote Sync and Dual Delete)" -ForegroundColor Green
     Write-Host "  [4] Conventional Commit Assistant (Professional Formatting)" -ForegroundColor Green
-    Write-Host "  [5] ⚡ Enable Universal Global CLI (Run 'git-wizard' from ANY Windows Folder)" -ForegroundColor Yellow
+    Write-Host "  [5] Enable Universal Global CLI (Run 'git-wizard' from ANY Windows Folder)" -ForegroundColor Yellow
     Write-Host "  [6] Exit" -ForegroundColor Green
     Write-Host "`n====================================================================" -ForegroundColor Cyan
 

@@ -1,29 +1,26 @@
 # ==============================================================================
-# MODULE:       commit-engine.ps1
-# DESCRIPTION:  Guides users to create Conventional Commit Messages.
+# ENGINE NAME: commit-engine.ps1 (PowerShell 5.1 Clean Edition)
 # ==============================================================================
 
-function Manage-ConventionalCommits {
-    Clear-Host
-    Write-Host "====================================================================" -ForegroundColor Cyan
-    Write-Host "  [+] Module 4: Conventional Commit Crafting Assistant (Windows)     " -ForegroundColor Yellow
-    Write-Host "====================================================================" -ForegroundColor Cyan
+function Craft-Commit {
+    Show-Header
+    Write-Host "  [+] Module 4: Conventional Commit Crafting Assistant`n" -ForegroundColor Yellow
     Write-Host "Select commit classification:"
-    Write-Host "  [1] feat:     A new feature for users"
-    Write-Host "  [2] fix:      A bug fix"
-    Write-Host "  [3] docs:     Documentation changes only"
-    Write-Host "  [4] refactor: Code restructuring without logic change"
-    Write-Host "  [5] chore:    Build process or dependency updates"
-    
-    $type = Read-Host "Select choice [1-5]"
+    Write-Host "  [1] feat:     A new feature for users" -ForegroundColor Green
+    Write-Host "  [2] fix:      A bug fix" -ForegroundColor Green
+    Write-Host "  [3] docs:     Documentation changes only" -ForegroundColor Green
+    Write-Host "  [4] refactor: Code restructuring without logic change" -ForegroundColor Green
+    Write-Host "  [5] chore:    Build process or dependency updates" -ForegroundColor Green
+
+    $cType = Read-Host "Select choice [1-5]"
     $prefix = ""
-    switch ($type) {
+    switch ($cType) {
         "1" { $prefix = "feat" }
         "2" { $prefix = "fix" }
         "3" { $prefix = "docs" }
         "4" { $prefix = "refactor" }
         "5" { $prefix = "chore" }
-        default { return }
+        default { Write-Host "Cancelled."; Pause-Console; return }
     }
 
     $scope = Read-Host "Enter short scope (optional, e.g. auth, api)"
@@ -36,9 +33,9 @@ function Manage-ConventionalCommits {
     }
 
     if ($scope) {
-        $finalMsg = "${prefix}(${scope}):${desc}"
+        $finalMsg = "${prefix}(${scope}): ${desc}"
     } else {
-        $finalMsg = "${prefix}:${desc}"
+        $finalMsg = "${prefix}: ${desc}"
     }
 
     Write-Host "`nCrafted Commit Message: $finalMsg" -ForegroundColor Cyan
@@ -46,7 +43,7 @@ function Manage-ConventionalCommits {
     if ($doCommit -eq "y" -or $doCommit -eq "Y") {
         git add .
         git commit -m "$finalMsg"
-        Write-Host "[✔] Conventional commit created!" -ForegroundColor Green
+        Write-Host "[+] Conventional commit created!" -ForegroundColor Green
     }
     Pause-Console
 }
