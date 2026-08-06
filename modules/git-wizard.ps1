@@ -1,5 +1,5 @@
 # ==============================================================================
-# TOOL NAME:    git-wizard.ps1 (Windows Master Orchestrator V1.2 Global Edition)
+# TOOL NAME:    git-wizard.ps1 (Windows Master Orchestrator V1.3 - Fixed Imports)
 # AUTHOR:       Saleem (Open Source DevOps/Sec Contributor)
 # DESCRIPTION:  Master orchestrator loading Git-Wizard Windows modules with 
 #               dynamic repository binding and 1-click Global CLI installer.
@@ -67,39 +67,23 @@ function Show-Header {
                                  @@@@@@@@                  @@@@@@@@                                 
                                      @@@                    @@@
 "@ -ForegroundColor Cyan
-
     Write-Host "====================================================================" -ForegroundColor Cyan
-    Write-Host "         🧙‍♂️ GIT-WIZARD ULTIMATE - GITHUB WORKFLOW ENGINE           " -ForegroundColor Cyan
+    Write-Host "         GIT-WIZARD ULTIMATE - GITHUB WORKFLOW ENGINE               " -ForegroundColor Cyan
     Write-Host "====================================================================" -ForegroundColor Cyan
+    Write-Host "GitHub  : https://github.com/ali4210" -ForegroundColor Yellow
     Write-Host "Active Repository Context: $TargetRepoDir`n" -ForegroundColor Yellow
+    # Print Debug Messages if sub-module loading failed
+    if ($LoadErrors.Count -gt 0) {
+        Write-Host "DEBUG / IMPORT WARNINGS:" -ForegroundColor Red
+        foreach ($Err in $LoadErrors) {
+            Write-Host "  [!] $Err" -ForegroundColor Red
+        }
+        Write-Host ""
+    }
 }
-
 function Pause-Console {
     Write-Host ""
     Read-Host "Press [ENTER] to return to menu..."
-}
-
-function Show-UpToDateCelebration {
-    Write-Host @"
-          ,~-.
-         (   ' )-.          ,~'`-.
-      ,~' `   ' ) )        _(    _) )
-     ( ( .--.===.--.    (   `    ' )
-      `.%%.;::|888.#`.   `-'`~~=~'
-      /%%/::::|8888\##\
-     |%%/:::::|88888\##|
-     |%%|:::::|88888|##|.,-.
-     \%%|:::::|88888|##/    )_
-      \%\:::::|88888/#/ ( `'   )
-       \%\::::|8888/#/(  ,  -'`-.
-   ,~-. `%\:::|888/#'(  (      ') )
-  (   ) )_ `\__|__/'    `~-~=--~~='
- ( ` ')  ) [VVVVV]
-(_(_.~~~'   \|_|/   hjw
-            [XXX]
-            `"""'
-"@ -ForegroundColor Green
-    Write-Host "Everything up-to-date! Code is safe and synced on GitHub!" -ForegroundColor Green
 }
 
 # --- Non-Git Repository Verification & Setup ---
@@ -119,7 +103,7 @@ function Test-GitRepository {
             "1" {
                 git init
                 git branch -M main 2>$null
-                Write-Host "`n[✔] Initialized empty Git repository in $TargetRepoDir!" -ForegroundColor Green
+                Write-Host "`n[+] Initialized empty Git repository in $TargetRepoDir!" -ForegroundColor Green
                 Pause-Console
             }
             "2" { Enable-GlobalPowerShellCLI }
@@ -145,15 +129,15 @@ function Enable-GlobalPowerShellCLI {
 
     if (-not (Get-Content -Path $ProfilePath -ErrorAction SilentlyContinue | Select-String -Pattern "function git-wizard")) {
         Add-Content -Path $ProfilePath -Value "`n# --- Git-Wizard Ultimate Global Shortcut ---`n$GlobalFunctionConfig"
-        Write-Host "`n[✔] 'git-wizard' function added to your PowerShell Profile!" -ForegroundColor Green
+        Write-Host "`n[+] 'git-wizard' function added to your PowerShell Profile!" -ForegroundColor Green
     } else {
-        Write-Host "`n[✔] 'git-wizard' is already configured in your PowerShell Profile." -ForegroundColor Green
+        Write-Host "`n[+] 'git-wizard' is already configured in your PowerShell Profile." -ForegroundColor Green
     }
 
     Write-Host "`n====================================================================" -ForegroundColor Cyan
-    Write-Host "[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON YOUR WINDOWS SYSTEM!" -ForegroundColor Green
+    Write-Host "[+] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON YOUR WINDOWS SYSTEM!" -ForegroundColor Green
     Write-Host "====================================================================" -ForegroundColor Cyan
-    Write-Host "📌 HOW TO USE FROM ANY WINDOWS FOLDER:" -ForegroundColor Cyan
+    Write-Host "HOW TO USE FROM ANY WINDOWS FOLDER:" -ForegroundColor Cyan
     Write-Host "  1. Open ANY PowerShell window or Windows Terminal." -ForegroundColor White
     Write-Host "  2. Simply type: git-wizard" -ForegroundColor Green
     Write-Host "====================================================================`n" -ForegroundColor Cyan
@@ -176,10 +160,26 @@ while ($true) {
     $mainChoice = Read-Host "Enter choice [1-6]"
 
     switch ($mainChoice) {
-        "1" { if (Get-Command Manage-GitIdentity -ErrorAction SilentlyContinue) { Manage-GitIdentity } else { Write-Host "[!] Module function Manage-GitIdentity missing." -ForegroundColor Red; Pause-Console } }
-        "2" { if (Get-Command Manage-GitRepo -ErrorAction SilentlyContinue) { Manage-GitRepo } else { Write-Host "[!] Module function Manage-GitRepo missing." -ForegroundColor Red; Pause-Console } }
-        "3" { if (Get-Command Manage-GitBranches -ErrorAction SilentlyContinue) { Manage-GitBranches } else { Write-Host "[!] Module function Manage-GitBranches missing." -ForegroundColor Red; Pause-Console } }
-        "4" { if (Get-Command Craft-ConventionalCommit -ErrorAction SilentlyContinue) { Craft-ConventionalCommit } else { Write-Host "[!] Module function Craft-ConventionalCommit missing." -ForegroundColor Red; Pause-Console } }
+        "1" {
+            if (Get-Command Manage-GitIdentity -ErrorAction SilentlyContinue) { Manage-GitIdentity }
+            elseif (Get-Command Manage-Identity -ErrorAction SilentlyContinue) { Manage-Identity }
+            else { Write-Host "[!] Module function for Identity missing." -ForegroundColor Red; Pause-Console }
+        }
+        "2" {
+            if (Get-Command Manage-GitRepo -ErrorAction SilentlyContinue) { Manage-GitRepo }
+            elseif (Get-Command Manage-Repo -ErrorAction SilentlyContinue) { Manage-Repo }
+            else { Write-Host "[!] Module function for Repository missing." -ForegroundColor Red; Pause-Console }
+        }
+        "3" {
+            if (Get-Command Manage-GitBranches -ErrorAction SilentlyContinue) { Manage-GitBranches }
+            elseif (Get-Command Manage-Branches -ErrorAction SilentlyContinue) { Manage-Branches }
+            else { Write-Host "[!] Module function for Branches missing." -ForegroundColor Red; Pause-Console }
+        }
+        "4" {
+            if (Get-Command Craft-ConventionalCommit -ErrorAction SilentlyContinue) { Craft-ConventionalCommit }
+            elseif (Get-Command Craft-Commit -ErrorAction SilentlyContinue) { Craft-Commit }
+            else { Write-Host "[!] Module function for Commit Assistant missing." -ForegroundColor Red; Pause-Console }
+        }
         "5" { Enable-GlobalPowerShellCLI }
         "6" { 
             Write-Host "`nKeep building amazing open-source software! Goodbye!" -ForegroundColor Green

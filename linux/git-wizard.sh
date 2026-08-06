@@ -80,7 +80,9 @@ EOF
     echo -e "${CYAN}${BOLD}====================================================================${NC}"
     echo -e "${CYAN}${BOLD}         🧙‍♂️ GIT-WIZARD ULTIMATE - GITHUB WORKFLOW ENGINE           ${NC}"
     echo -e "${CYAN}${BOLD}====================================================================${NC}"
+    echo -e "${YELLOW}GitHub  :${NC} ${BOLD}https://github.com/ali4210${NC}"
     echo -e "${YELLOW}Active Repository Context:${NC} ${BOLD}${TARGET_REPO_DIR}${NC}\n"
+
 }
 
 pause() {
