@@ -148,10 +148,44 @@ check_git_repo() {
     fi
 }
 
-# --- Module: Global CLI Installer ---
+# --- Module: Global CLI Installer (OS Selector) ---
 enable_global_cli() {
     show_header
     echo -e "${YELLOW}${BOLD}⚡ MODULE: UNIVERSAL GLOBAL CLI INSTALLER${NC}\n"
+    echo -e "${CYAN}Which operating system do you want to enable 'git-wizard' for?${NC}\n"
+    echo -e "  ${GREEN}[1]${NC} Linux (Debian, Ubuntu, Kali, RHEL, CentOS, Fedora, Arch)"
+    echo -e "  ${GREEN}[2]${NC} macOS"
+    echo -e "  ${GREEN}[3]${NC} Windows (PowerShell / CMD)"
+    echo -e "  ${GREEN}[4]${NC} Back"
+    echo -e "\n===================================================================="
+    read -p "Select choice [1-4]: " OS_CHOICE
+
+    case $OS_CHOICE in
+        1) enable_global_cli_linux ;;
+        2) enable_global_cli_macos ;;
+        3)
+            echo -e "\n${YELLOW}[i] Windows installation must be run from within Windows itself.${NC}"
+            echo -e "    On your Windows machine, launch: ${BOLD}autorun.bat${NC}"
+            echo -e "    Then select Option [5] -> choose PowerShell / CMD / Both.\n"
+            pause
+            ;;
+        4) return ;;
+        *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+    esac
+}
+
+# --- Linux Installer ---
+enable_global_cli_linux() {
+    show_header
+    echo -e "${YELLOW}${BOLD}LINUX GLOBAL CLI INSTALLER${NC}\n"
+
+    # Detect distro family (informational — install path is the same either way,
+    # but useful if we need to branch on package managers later)
+    local DISTRO_NAME="Unknown"
+    if [[ -f /etc/os-release ]]; then
+        DISTRO_NAME=$(grep -E '^NAME=' /etc/os-release | cut -d'"' -f2)
+    fi
+    echo -e "${CYAN}--> Detected distribution: ${BOLD}${DISTRO_NAME}${NC}"
     echo -e "${CYAN}--> Linking 'git-wizard' into system path (/usr/local/bin/git-wizard)...${NC}\n"
 
     local SCRIPT_PATH="${SCRIPT_DIR}/linux/git-wizard.sh"
@@ -165,11 +199,53 @@ enable_global_cli() {
     fi
 
     echo -e "\n===================================================================="
-    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON YOUR SYSTEM!${NC}"
+    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON LINUX!${NC}"
     echo -e "===================================================================="
     echo -e "${CYAN}📌 HOW TO USE FROM ANY REPOSITORY:${NC}"
     echo -e "  1. Open ANY terminal and 'cd' into ANY project on your computer."
     echo -e "  2. Simply type: ${GREEN}${BOLD}git-wizard${NC}"
+    echo -e "====================================================================\n"
+    pause
+}
+
+# --- macOS Installer ---
+enable_global_cli_macos() {
+    show_header
+    echo -e "${YELLOW}${BOLD}macOS GLOBAL CLI INSTALLER${NC}\n"
+
+    local SCRIPT_PATH="${SCRIPT_DIR}/linux/git-wizard.sh"
+    chmod +x "$SCRIPT_PATH"
+
+    # Determine correct target bin directory based on CPU architecture.
+    # Apple Silicon Homebrew installs to /opt/homebrew/bin, Intel Macs use /usr/local/bin.
+    local TARGET_BIN="/usr/local/bin"
+    if [[ "$(uname -m)" == "arm64" ]] && [[ -d "/opt/homebrew/bin" ]]; then
+        TARGET_BIN="/opt/homebrew/bin"
+    fi
+
+    echo -e "${CYAN}--> Detected target directory: ${BOLD}${TARGET_BIN}${NC}"
+
+    if [[ ! -d "$TARGET_BIN" ]]; then
+        echo -e "${CYAN}--> Creating ${TARGET_BIN} (does not exist by default on newer macOS)...${NC}"
+        sudo mkdir -p "$TARGET_BIN"
+    fi
+
+    echo -e "${CYAN}--> Linking 'git-wizard' into ${TARGET_BIN}/git-wizard...${NC}\n"
+
+    if [[ -w "$TARGET_BIN" ]]; then
+        ln -sf "$SCRIPT_PATH" "${TARGET_BIN}/git-wizard"
+    else
+        echo -e "${CYAN}--> Requesting root permission to link binary...${NC}"
+        sudo ln -sf "$SCRIPT_PATH" "${TARGET_BIN}/git-wizard"
+    fi
+
+    echo -e "\n===================================================================="
+    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON macOS!${NC}"
+    echo -e "===================================================================="
+    echo -e "${CYAN}📌 HOW TO USE FROM ANY REPOSITORY:${NC}"
+    echo -e "  1. Open ANY Terminal window and 'cd' into ANY project."
+    echo -e "  2. Simply type: ${GREEN}${BOLD}git-wizard${NC}"
+    echo -e "  ${YELLOW}(If 'command not found', ensure ${TARGET_BIN} is in your \$PATH)${NC}"
     echo -e "====================================================================\n"
     pause
 }
