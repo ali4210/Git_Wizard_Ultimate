@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Auto-fix permissions for all modules and scripts in the repository
+find "$(dirname "$0")" -type f -name "*.sh" -exec chmod +x {} + 2>/dev/null
 # ==============================================================================
 # TOOL NAME:    autorun.sh (Git-Wizard Master Launcher)
 # AUTHOR:       Saleem (Open Source DevOps/Sec Contributor)
