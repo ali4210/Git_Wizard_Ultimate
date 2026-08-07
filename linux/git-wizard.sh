@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# TOOL NAME:    git-wizard.sh (Universal Global CLI Edition V1.2)
+# TOOL NAME:    git-wizard.sh (Universal Global CLI Gold Standard Edition V2.0)
 # AUTHOR:       Saleem (Open Source DevOps/Sec Contributor)
-# DESCRIPTION:  Interactive CLI Suite for Git/GitHub Onboarding & Workflows.
-# COMPATIBILITY: Debian, Ubuntu, Kali Linux, RHEL, CentOS, Fedora, Arch
+# DESCRIPTION:  Enterprise-Grade Git Orchestrator, Multi-Mode Workflow Suite, 
+#               Fork-Aware Upstream Sync Engine, and PR Release Center.
+# COMPATIBILITY: Linux (Debian, Kali, Ubuntu, RHEL, CentOS, Arch), macOS, WSL
 # ==============================================================================
 
 set -e
 
-# Target repository is ALWAYS the current directory where the command was executed
+# Target repository context
 TARGET_REPO_DIR="$(pwd)"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_DIR="${HOME}/.git_wizard"
+STATE_FILE="${STATE_DIR}/state.json"
 
 # --- Colors & Formatting ---
 RED='\033[0;31m'
@@ -20,74 +23,119 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Ensure State Directory Exists
+mkdir -p "$STATE_DIR"
+
+# State Variables Initialization
+if [ ! -f "$STATE_FILE" ]; then
+    cat <<EOF > "$STATE_FILE"
+{
+  "mode": "Enterprise",
+  "dry_run": false,
+  "sync_watcher": true
+}
+EOF
+fi
+
+# Load State Settings
+GW_MODE=$(python3 -c "import json; print(json.load(open('$STATE_FILE')).get('mode','Enterprise'))" 2>/dev/null || echo "Enterprise")
+GW_DRY_RUN=$(python3 -c "import json; print(json.load(open('$STATE_FILE')).get('dry_run',False))" 2>/dev/null || echo "false")
+GW_WATCHER=$(python3 -c "import json; print(json.load(open('$STATE_FILE')).get('sync_watcher',True))" 2>/dev/null || echo "true")
+
+save_state() {
+    cat <<EOF > "$STATE_FILE"
+{
+  "mode": "$GW_MODE",
+  "dry_run": $GW_DRY_RUN,
+  "sync_watcher": $GW_WATCHER
+}
+EOF
+}
+
+# --- Pager Helper (Delta or Native Git) ---
+get_pager() {
+    if command -v delta &>/dev/null; then
+        echo "delta"
+    else
+        echo "cat"
+    fi
+}
+
+# --- Dynamic Remote Sync Status Header ---
+get_sync_status() {
+    if ! git -C "$TARGET_REPO_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        echo -e "${RED}[NOT A GIT REPO]${NC}"
+        return
+    fi
+
+    if [ "$GW_WATCHER" = "true" ]; then
+        git -C "$TARGET_REPO_DIR" fetch origin --quiet 2>/dev/null || true
+    fi
+
+    local branch
+    branch=$(git -C "$TARGET_REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
+    
+    local ahead behind
+    ahead=$(git -C "$TARGET_REPO_DIR" rev-list --count "origin/${branch}..HEAD" 2>/dev/null || echo "0")
+    behind=$(git -C "$TARGET_REPO_DIR" rev-list --count "HEAD..origin/${branch}" 2>/dev/null || echo "0")
+
+    if [ "$ahead" -eq 0 ] && [ "$behind" -eq 0 ]; then
+        echo -e "${GREEN}🟢 100% SYNCED WITH GITHUB${NC} (Branch: ${CYAN}${branch}${NC})"
+    elif [ "$ahead" -gt 0 ] && [ "$behind" -eq 0 ]; then
+        echo -e "${YELLOW}🟡 LOCAL AHEAD BY $ahead COMMIT(S)${NC} (Needs Push)"
+    elif [ "$ahead" -eq 0 ] && [ "$behind" -gt 0 ]; then
+        echo -e "${RED}🔴 LOCAL BEHIND BY $behind COMMIT(S)${NC} (Needs Safe Sync)"
+    else
+        echo -e "${RED}⚠️ DIVERGED (Ahead: $ahead | Behind: $behind)${NC} (Conflict Resolver Needed)"
+    fi
+}
+
 show_header() {
     clear
     IMAGE_PATH="${SCRIPT_DIR}/assets/octocat.png"
 
-    # Render high-res PNG via chafa if available
     if command -v chafa &>/dev/null && [[ -f "$IMAGE_PATH" ]]; then
-        chafa --size=35x15 "$IMAGE_PATH"
+        chafa --size=35x12 "$IMAGE_PATH" 2>/dev/null || true
         echo ""
     else
-        # Fallback ASCII Logo
         echo -e "${CYAN}${BOLD}"
         cat << "EOF"
-                                            @@@@@@@@@@@@                                            
-                                      @@@@@@@@@@@@@@@@@@@@@@@@@                                     
-                                 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                                 
-                              @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                              
-                           @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                           
-                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                         
-                       @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       
-                      @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      
-                    @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    
-                   @@@@@@@@@@@      @@@@@@@@@@@@@@@@@@@@@@@@@@@@      @@@@@@@@@@@                   
-                  @@@@@@@@@@@          @@@@@@          @@@@@@          @@@@@@@@@@@                  
-                 @@@@@@@@@@@@                                          @@@@@@@@@@@@                 
-                @@@@@@@@@@@@@                                          @@@@@@@@@@@@@                
-               @@@@@@@@@@@@@@                                          @@@@@@@@@@@@@@               
-              @@@@@@@@@@@@@@@@                                        @@@@@@@@@@@@@@@@              
-              @@@@@@@@@@@@@@                                            @@@@@@@@@@@@@@              
-              @@@@@@@@@@@@@                                              @@@@@@@@@@@@@              
-             @@@@@@@@@@@@@@                                               @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@@                                              @@@@@@@@@@@@@@             
-             @@@@@@@@@@@@@@                                              @@@@@@@@@@@@@@             
-              @@@@@@@@@@@@@@                                            @@@@@@@@@@@@@@              
-              @@@@@@@@@@@@@@@                                          @@@@@@@@@@@@@@@              
-              @@@@@@@@@@@@@@@@@                                      @@@@@@@@@@@@@@@@@              
-               @@@@@@@@@@@@@@@@@@                                  @@@@@@@@@@@@@@@@@@               
-                @@@@@@@   @@@@@@@@@@                            @@@@@@@@@@@@@@@@@@@@                
-                @@@@@@@@     @@@@@@@@@@@@@@              @@@@@@@@@@@@@@@@@@@@@@@@@@@                
-                  @@@@@@@@    @@@@@@@@@@@                  @@@@@@@@@@@@@@@@@@@@@@@                  
-                   @@@@@@@@     @@@@@@@@@                  @@@@@@@@@@@@@@@@@@@@@@                   
-                    @@@@@@@@                               @@@@@@@@@@@@@@@@@@@@@                    
-                     -@@@@@@@                              @@@@@@@@@@@@@@@@@@@-                     
-                       @@@@@@@@                            @@@@@@@@@@@@@@@@@@                       
-                         @@@@@@@@@@@@@@@@                  @@@@@@@@@@@@@@@@                         
-                           @@@@@@@@@@@@@@                  @@@@@@@@@@@@@@                           
-                             %@@@@@@@@@@@                  @@@@@@@@@@@%                             
-                                 @@@@@@@@                  @@@@@@@@                                 
-                                     @@@                    @@@
+  ██████╗ ██╗████████╗    ██╗██╗    ██╗██╗███████╗██████╗  ██████╗ 
+ ██╔════╝ ██║╚══██╔══╝    ██║██║    ██║██║██╔════╝██╔══██╗██╔════╝ 
+ ██║  ███╗██║   ██║  ███████║██║ █╗ ██║██║███████╗██████╔╝██║  ███╗
+ ██║   ██║██║   ██║  ╚════██║██║███╗██║██║╚════██║██╔══██╗██║   ██║
+ ╚██████╔╝██║   ██║       ██║╚███╔███╔╝██║███████║██║  ██║╚██████╔╝
+  ╚═════╝ ╚═╝   ╚═╝       ╚═╝ ╚══╝╚══╝ ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ 
 EOF
         echo -e "${NC}"
     fi
 
-    echo -e "${CYAN}${BOLD}====================================================================${NC}"
-    echo -e "${CYAN}${BOLD}         🧙‍♂️ GIT-WIZARD ULTIMATE - GITHUB WORKFLOW ENGINE           ${NC}"
-    echo -e "${CYAN}${BOLD}====================================================================${NC}"
-    echo -e "${YELLOW}GitHub  :${NC} ${BOLD}https://github.com/ali4210${NC}"
-    echo -e "${YELLOW}Active Repository Context:${NC} ${BOLD}${TARGET_REPO_DIR}${NC}\n"
+    local remote_url
+    remote_url=$(git -C "$TARGET_REPO_DIR" remote get-url origin 2>/dev/null || echo "No Remote Configured")
+    local upstream_url
+    upstream_url=$(git -C "$TARGET_REPO_DIR" remote get-url upstream 2>/dev/null || echo "None")
 
+    local dry_run_text
+    dry_run_text=$( [ "$GW_DRY_RUN" = "true" ] && echo -e "${YELLOW}[ON - PREVIEW MODE]${NC}" || echo -e "${CYAN}[OFF - LIVE WRITES]${NC}" )
+    local watcher_text
+    watcher_text=$( [ "$GW_WATCHER" = "true" ] && echo -e "${GREEN}[ENABLED]${NC}" || echo -e "${RED}[DISABLED]${NC}" )
+
+    echo -e "${CYAN}${BOLD}====================================================================${NC}"
+    echo -e "${CYAN}${BOLD}        🧙‍♂️ GIT-WIZARD ULTIMATE - ENTERPRISE GITHUB ENGINE           ${NC}"
+    echo -e "${CYAN}${BOLD}====================================================================${NC}"
+    echo -e "${YELLOW}Active Repo Path:${NC} ${BOLD}${TARGET_REPO_DIR}${NC}"
+    echo -e "${YELLOW}Origin Remote   :${NC} ${CYAN}${remote_url}${NC}"
+    if [ "$upstream_url" != "None" ]; then
+        echo -e "${YELLOW}Upstream Remote :${NC} ${CYAN}${upstream_url}${NC}"
+    fi
+    echo -e "${YELLOW}Sync Status     :${NC} $(get_sync_status)"
+    echo -e "${YELLOW}Engine Mode     :${NC} ${GREEN}${GW_MODE}${NC} | ${YELLOW}Dry-Run:${NC} ${dry_run_text} | ${YELLOW}Watcher:${NC} ${watcher_text}"
+    echo -e "${CYAN}${BOLD}====================================================================${NC}\n"
 }
 
 pause() {
     echo ""
-    read -p "Press [ENTER] to return to menu..."
+    read -rp "Press [ENTER] to return to menu..."
 }
 
 show_uptodate_celebration() {
@@ -96,33 +144,21 @@ show_uptodate_celebration() {
           ,~-.
          (   ' )-.          ,~'`-.
       ,~' `   ' ) )        _(    _) )
-     ( ( .--.===.--.    (   `    ' )
+     ( ( .--.===.--.    (    `    ' )
       `.%%.;::|888.#`.   `-'`~~=~'
       /%%/::::|8888\##\
      |%%/:::::|88888\##|
-     |%%|:::::|88888|##|.,-.
-     \%%|:::::|88888|##/    )_
-      \%\:::::|88888/#/ ( `'   )
-       \%\::::|8888/#/(  ,  -'`-.
-   ,~-. `%\:::|888/#'(  (      ') )
-  (   ) )_ `\__|__/'    `~-~=--~~='
- ( ` ')  ) [VVVVV]
-(_(_.~~~'   \|_|/   hjw
-            [XXX]
-            `"""'
 EOF
     echo -e "${NC}"
     echo -e "${GREEN}${BOLD}Everything up-to-date! Code is safe and synced on GitHub!${NC}"
 }
 
-# --- Clean URL Helper ---
 clean_remote_url() {
     local input_url="$1"
     input_url=$(echo "$input_url" | sed -E 's/^git remote (add|set-url) origin //I' | xargs)
     echo "$input_url"
 }
 
-# --- Non-Git Repository Verification & Setup ---
 check_git_repo() {
     if ! git -C "$TARGET_REPO_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
         show_header
@@ -132,7 +168,7 @@ check_git_repo() {
         echo -e "  ${YELLOW}${BOLD}[2] ⚡ Enable Universal Global CLI (Install 'git-wizard' system-wide)${NC}"
         echo -e "  ${GREEN}[3]${NC} Exit"
         echo -e "\n===================================================================="
-        read -p "Select choice [1-3]: " NON_REPO_CHOICE
+        read -rp "Select choice [1-3]: " NON_REPO_CHOICE
 
         case $NON_REPO_CHOICE in
             1)
@@ -148,25 +184,290 @@ check_git_repo() {
     fi
 }
 
-# --- Module: Global CLI Installer (OS Selector) ---
+# --- Module: Global CLI & Profile Block Installer ---
 enable_global_cli() {
     show_header
-    echo -e "${YELLOW}${BOLD}⚡ MODULE: UNIVERSAL GLOBAL CLI INSTALLER${NC}\n"
-    echo -e "${CYAN}Which operating system do you want to enable 'git-wizard' for?${NC}\n"
-    echo -e "  ${GREEN}[1]${NC} Linux (Debian, Ubuntu, Kali, RHEL, CentOS, Fedora, Arch)"
-    echo -e "  ${GREEN}[2]${NC} macOS"
-    echo -e "  ${GREEN}[3]${NC} Windows (PowerShell / CMD)"
-    echo -e "  ${GREEN}[4]${NC} Back"
-    echo -e "\n===================================================================="
-    read -p "Select choice [1-4]: " OS_CHOICE
+    echo -e "${YELLOW}${BOLD}⚡ MODULE: UNIVERSAL GLOBAL CLI & MANAGED BLOCK INSTALLER${NC}\n"
+    
+    local TARGET_BIN="/usr/local/bin/git-wizard"
+    local SCRIPT_PATH="${SCRIPT_DIR}/git-wizard.sh"
+    chmod +x "$SCRIPT_PATH" 2>/dev/null || true
 
-    case $OS_CHOICE in
-        1) enable_global_cli_linux ;;
-        2) enable_global_cli_macos ;;
+    if [ "$GW_DRY_RUN" = "true" ]; then
+        echo -e "${YELLOW}[DRY-RUN] Would create symlink from $SCRIPT_PATH to $TARGET_BIN${NC}"
+        pause
+        return
+    fi
+
+    echo -e "${CYAN}--> Creating global symlink at $TARGET_BIN...${NC}"
+    if [ -w "/usr/local/bin" ]; then
+        ln -sf "$SCRIPT_PATH" "$TARGET_BIN"
+    else
+        sudo ln -sf "$SCRIPT_PATH" "$TARGET_BIN"
+    fi
+
+    local SHELL_RC=""
+    if [ -f "$HOME/.zshrc" ]; then
+        SHELL_RC="$HOME/.zshrc"
+    elif [ -f "$HOME/.bashrc" ]; then
+        SHELL_RC="$HOME/.bashrc"
+    fi
+
+    if [ -n "$SHELL_RC" ]; then
+        echo -e "${CYAN}--> Injecting Managed Profile Block into $SHELL_RC...${NC}"
+        
+        BLOCK_START="# >>> GIT-WIZARD MANAGED BLOCK >>>"
+        BLOCK_END="# <<< GIT-WIZARD MANAGED BLOCK <<<"
+        ALIAS_LINE="alias gw='git-wizard'"
+
+        if grep -q "$BLOCK_START" "$SHELL_RC"; then
+            echo -e "${GREEN}[OK] Managed profile block already exists in $SHELL_RC${NC}"
+        else
+            echo -e "\n$BLOCK_START\n$ALIAS_LINE\n$BLOCK_END" >> "$SHELL_RC"
+            echo -e "${GREEN}[✔] Added 'gw' alias cleanly inside Managed Profile Block!${NC}"
+        fi
+    fi
+
+    echo -e "\n===================================================================="
+    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON YOUR SYSTEM!${NC}"
+    echo -e "===================================================================="
+    echo -e "${CYAN}📌 You can now open ANY terminal and type: ${GREEN}${BOLD}git-wizard${NC} or ${GREEN}${BOLD}gw${NC}"
+    echo -e "====================================================================\n"
+    pause
+}
+
+# --- Module 1: Linear Solo Mode ---
+linear_solo_mode() {
+    show_header
+    echo -e "${YELLOW}${BOLD}🔄 LINEAR SOLO MODE (1-PERSON SEQUENTIAL WORKFLOW)${NC}\n"
+    
+    if [ "$GW_MODE" = "Beginner" ]; then
+        echo -e "${CYAN}💡 BEGINNER GUIDE:${NC}"
+        echo -e "Use this mode when you are working alone on 'main'."
+        echo -e "Always pull before pushing to keep your timeline clean.\n"
+    fi
+
+    git add .
+    if [ -z "$(git status --porcelain)" ]; then
+        echo -e "${YELLOW}[i] Working tree clean (no new changes to commit).${NC}\n"
+        show_uptodate_celebration
+        pause
+        return
+    fi
+
+    read -rp "Enter commit message: " MSG
+    if [ -z "$MSG" ]; then
+        echo -e "${RED}Commit message cannot be empty!${NC}"
+        pause
+        return
+    fi
+
+    if [ "$GW_DRY_RUN" = "true" ]; then
+        echo -e "${YELLOW}[DRY-RUN] Would run: git commit -m \"$MSG\" && git push origin main${NC}"
+        pause
+        return
+    fi
+
+    git commit -m "$MSG"
+    local branch
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    
+    echo -e "${GREEN}--> Pushing changes to origin $branch...${NC}"
+    git push origin "$branch" || echo -e "${YELLOW}[!] Push rejected. Use Module [5] (Smart Conflict Push Resolver) to sync!${NC}"
+    pause
+}
+
+# --- Module 2: Enterprise Team Mode ---
+enterprise_team_mode() {
+    show_header
+    echo -e "${YELLOW}${BOLD}🌿 ENTERPRISE TEAM MODE (FEATURE BRANCH & PULL REQUEST FLOW)${NC}\n"
+
+    if [ "$GW_MODE" = "Beginner" ]; then
+        echo -e "${CYAN}💡 BEGINNER GUIDE:${NC}"
+        echo -e "Use this mode when working with teammates."
+        echo -e "Create a new branch so your changes stay isolated without breaking 'main'!\n"
+    fi
+
+    echo -e "Select branch classification:"
+    echo -e "  ${GREEN}[1] feature/${NC}  New feature or capability"
+    echo -e "  ${GREEN}[2] bugfix/${NC}   Bug fix / resolution"
+    echo -e "  ${GREEN}[3] hotfix/${NC}   Urgent production fix"
+    echo -e "  ${GREEN}[4] docs/${NC}     Documentation update"
+    read -rp "Select type [1-4]: " B_TYPE
+
+    local prefix=""
+    case $B_TYPE in
+        1) prefix="feature/" ;;
+        2) prefix="bugfix/" ;;
+        3) prefix="hotfix/" ;;
+        4) prefix="docs/" ;;
+        *) echo "Cancelled."; pause; return ;;
+    esac
+
+    read -rp "Enter short branch description (e.g., powershell-fix): " B_DESC
+    if [ -z "$B_DESC" ]; then
+        echo -e "${RED}Description required!${NC}"
+        pause
+        return
+    fi
+
+    local FULL_BRANCH="${prefix}${B_DESC}"
+
+    if [ "$GW_DRY_RUN" = "true" ]; then
+        echo -e "${YELLOW}[DRY-RUN] Would create branch '$FULL_BRANCH' and push to GitHub.${NC}"
+        pause
+        return
+    fi
+
+    git checkout -b "$FULL_BRANCH"
+    echo -e "${GREEN}[✔] Switched to new branch: $FULL_BRANCH${NC}"
+
+    read -rp "Do you want to stage, commit, and push changes now? (y/N): " DO_PUSH
+    if [[ "$DO_PUSH" =~ ^[Yy]$ ]]; then
+        git add .
+        read -rp "Enter commit message: " C_MSG
+        C_MSG=${C_MSG:-"Work on $FULL_BRANCH"}
+        git commit -m "$C_MSG"
+        git push -u origin "$FULL_BRANCH"
+
+        echo -e "\n${GREEN}[✔] Branch '$FULL_BRANCH' published to GitHub!${NC}"
+        local remote_url
+        remote_url=$(git remote get-url origin 2>/dev/null | sed 's/\.git$//')
+        echo -e "${CYAN}--> Open Pull Request URL: ${remote_url}/pull/new/${FULL_BRANCH}${NC}"
+    fi
+    pause
+}
+
+# --- Module 3: Safe Upstream Sync ---
+safe_upstream_sync() {
+    show_header
+    echo -e "${YELLOW}${BOLD}⚡ SAFE UPSTREAM SYNC ENGINE (STASH & POP PROTECTION)${NC}\n"
+
+    local has_upstream=false
+    if git remote | grep -q "upstream"; then
+        has_upstream=true
+    fi
+
+    echo -e "Target Remote Sync Strategy:"
+    echo -e "  ${GREEN}[1]${NC} Sync from ${CYAN}origin/main${NC} (Standard Teammate Sync)"
+    if [ "$has_upstream" = "true" ]; then
+        echo -e "  ${GREEN}[2]${NC} Sync from ${CYAN}upstream/main${NC} (Fork-Aware Parent Repo Sync)"
+    else
+        echo -e "  ${YELLOW}[2]${NC} Configure ${CYAN}upstream${NC} Remote URL (Link Original Fork Parent)"
+    fi
+    read -rp "Select choice [1-2]: " SYNC_CHOICE
+
+    local target_remote="origin"
+    if [ "$SYNC_CHOICE" = "2" ]; then
+        if [ "$has_upstream" = "false" ]; then
+            read -rp "Enter Upstream Repository URL: " UP_URL
+            UP_URL=$(clean_remote_url "$UP_URL")
+            if [ -n "$UP_URL" ]; then
+                git remote add upstream "$UP_URL"
+                echo -e "${GREEN}[✔] Added upstream remote: $UP_URL${NC}"
+            fi
+            target_remote="upstream"
+        else
+            target_remote="upstream"
+        fi
+    fi
+
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+
+    if [ "$GW_DRY_RUN" = "true" ]; then
+        echo -e "${YELLOW}[DRY-RUN] Would stash work, fetch $target_remote main, rebase $current_branch, and pop stash.${NC}"
+        pause
+        return
+    fi
+
+    echo -e "\n${GREEN}--> Stashing uncommitted local changes...${NC}"
+    git stash save "Git-Wizard Safe Sync Auto-Stash" 2>/dev/null || true
+
+    echo -e "${GREEN}--> Fetching latest code from $target_remote...${NC}"
+    git fetch "$target_remote"
+
+    echo -e "${GREEN}--> Rebasing $current_branch onto $target_remote/main...${NC}"
+    if git rebase "$target_remote/main"; then
+        echo -e "${GREEN}[✔] Rebase successful!${NC}"
+    else
+        echo -e "${RED}[!] Rebase conflict encountered! Aborting rebase to protect working tree...${NC}"
+        git rebase --abort
+    fi
+
+    echo -e "${GREEN}--> Restoring stashed local changes...${NC}"
+    git stash pop 2>/dev/null || true
+
+    echo -e "\n${GREEN}[✔] SAFE UPSTREAM SYNC COMPLETE!${NC}"
+    pause
+}
+
+# --- Module 4: Admin Merge & PR Release Center ---
+admin_merge_center() {
+    show_header
+    echo -e "${YELLOW}${BOLD}🔀 ADMIN MERGE & PR RELEASE CENTER${NC}\n"
+
+    echo -e "Fetching latest remote branches from GitHub..."
+    git fetch origin --prune
+
+    echo -e "\n${CYAN}--- Active Remote Contributor Branches ---${NC}"
+    git branch -r | grep -v 'HEAD' | grep 'origin/' || echo "No remote feature branches found."
+    echo -e "-----------------------------------------------------\n"
+
+    echo -e "  ${GREEN}[1]${NC} Inspect Diff of a Contributor Branch"
+    echo -e "  ${GREEN}[2]${NC} Merge Branch into ${CYAN}main${NC} & Push Release"
+    echo -e "  ${GREEN}[3]${NC} Use GitHub CLI (${CYAN}gh${NC}) PR Review Dashboard"
+    echo -e "  ${GREEN}[4]${NC} Back to Main Menu"
+    read -rp "Select choice [1-4]: " MERGE_CHOICE
+
+    case $MERGE_CHOICE in
+        1)
+            read -rp "Enter branch name to inspect (e.g., origin/feature/x): " TARGET_B
+            if [ -n "$TARGET_B" ]; then
+                show_header
+                echo -e "${YELLOW}--- Line Diff for $TARGET_B vs main ---${NC}\n"
+                git diff "main..$TARGET_B" | $(get_pager)
+            fi
+            pause
+            ;;
+        2)
+            read -rp "Enter branch name to merge into main (e.g., feature/x): " TARGET_B
+            TARGET_B=$(echo "$TARGET_B" | sed 's#^origin/##')
+
+            if [ -n "$TARGET_B" ]; then
+                if [ "$GW_DRY_RUN" = "true" ]; then
+                    echo -e "${YELLOW}[DRY-RUN] Would checkout main, merge $TARGET_B, and push to origin main.${NC}"
+                    pause
+                    return
+                fi
+
+                git checkout main
+                git pull origin main
+                echo -e "${GREEN}--> Merging $TARGET_B into main...${NC}"
+                git merge "origin/$TARGET_B" --no-ff -m "Merge branch '$TARGET_B' into main"
+                git push origin main
+                echo -e "${GREEN}[✔] Branch '$TARGET_B' merged and pushed to production main!${NC}"
+            fi
+            pause
+            ;;
         3)
-            echo -e "\n${YELLOW}[i] Windows installation must be run from within Windows itself.${NC}"
-            echo -e "    On your Windows machine, launch: ${BOLD}autorun.bat${NC}"
-            echo -e "    Then select Option [5] -> choose PowerShell / CMD / Both.\n"
+            if command -v gh &>/dev/null; then
+                gh pr list
+                echo ""
+                read -rp "Enter PR number to review/merge (or press ENTER to exit): " PR_NUM
+                if [ -n "$PR_NUM" ]; then
+                    gh pr merge "$PR_NUM" --merge --delete-branch
+                fi
+            else
+                echo -e "${RED}[!] GitHub CLI ('gh') is not installed.${NC}"
+                read -rp "Would you like to install 'gh' via system package manager? (y/N): " INST_GH
+                if [[ "$INST_GH" =~ ^[Yy]$ ]]; then
+                    if command -v apt &>/dev/null; then sudo apt install -y gh
+                    elif command -v dnf &>/dev/null; then sudo dnf install -y gh
+                    elif command -v pacman &>/dev/null; then sudo pacman -S --noconfirm github-cli
+                    fi
+                fi
+            fi
             pause
             ;;
         4) return ;;
@@ -174,586 +475,112 @@ enable_global_cli() {
     esac
 }
 
-# --- Linux Installer ---
-enable_global_cli_linux() {
-    show_header
-    echo -e "${YELLOW}${BOLD}LINUX GLOBAL CLI INSTALLER${NC}\n"
-
-    # Detect distro family (informational — install path is the same either way,
-    # but useful if we need to branch on package managers later)
-    local DISTRO_NAME="Unknown"
-    if [[ -f /etc/os-release ]]; then
-        DISTRO_NAME=$(grep -E '^NAME=' /etc/os-release | cut -d'"' -f2)
-    fi
-    echo -e "${CYAN}--> Detected distribution: ${BOLD}${DISTRO_NAME}${NC}"
-    echo -e "${CYAN}--> Linking 'git-wizard' into system path (/usr/local/bin/git-wizard)...${NC}\n"
-
-    local SCRIPT_PATH="${SCRIPT_DIR}/linux/git-wizard.sh"
-    chmod +x "$SCRIPT_PATH"
-
-    if [[ -w "/usr/local/bin" ]]; then
-        ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard
-    else
-        echo -e "${CYAN}--> Requesting root permission to link binary into /usr/local/bin/git-wizard...${NC}"
-        sudo ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard
-    fi
-
-    echo -e "\n===================================================================="
-    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON LINUX!${NC}"
-    echo -e "===================================================================="
-    echo -e "${CYAN}📌 HOW TO USE FROM ANY REPOSITORY:${NC}"
-    echo -e "  1. Open ANY terminal and 'cd' into ANY project on your computer."
-    echo -e "  2. Simply type: ${GREEN}${BOLD}git-wizard${NC}"
-    echo -e "====================================================================\n"
-    pause
-}
-
-# --- macOS Installer ---
-enable_global_cli_macos() {
-    show_header
-    echo -e "${YELLOW}${BOLD}macOS GLOBAL CLI INSTALLER${NC}\n"
-
-    local SCRIPT_PATH="${SCRIPT_DIR}/linux/git-wizard.sh"
-    chmod +x "$SCRIPT_PATH"
-
-    # Determine correct target bin directory based on CPU architecture.
-    # Apple Silicon Homebrew installs to /opt/homebrew/bin, Intel Macs use /usr/local/bin.
-    local TARGET_BIN="/usr/local/bin"
-    if [[ "$(uname -m)" == "arm64" ]] && [[ -d "/opt/homebrew/bin" ]]; then
-        TARGET_BIN="/opt/homebrew/bin"
-    fi
-
-    echo -e "${CYAN}--> Detected target directory: ${BOLD}${TARGET_BIN}${NC}"
-
-    if [[ ! -d "$TARGET_BIN" ]]; then
-        echo -e "${CYAN}--> Creating ${TARGET_BIN} (does not exist by default on newer macOS)...${NC}"
-        sudo mkdir -p "$TARGET_BIN"
-    fi
-
-    echo -e "${CYAN}--> Linking 'git-wizard' into ${TARGET_BIN}/git-wizard...${NC}\n"
-
-    if [[ -w "$TARGET_BIN" ]]; then
-        ln -sf "$SCRIPT_PATH" "${TARGET_BIN}/git-wizard"
-    else
-        echo -e "${CYAN}--> Requesting root permission to link binary...${NC}"
-        sudo ln -sf "$SCRIPT_PATH" "${TARGET_BIN}/git-wizard"
-    fi
-
-    echo -e "\n===================================================================="
-    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON macOS!${NC}"
-    echo -e "===================================================================="
-    echo -e "${CYAN}📌 HOW TO USE FROM ANY REPOSITORY:${NC}"
-    echo -e "  1. Open ANY Terminal window and 'cd' into ANY project."
-    echo -e "  2. Simply type: ${GREEN}${BOLD}git-wizard${NC}"
-    echo -e "  ${YELLOW}(If 'command not found', ensure ${TARGET_BIN} is in your \$PATH)${NC}"
-    echo -e "====================================================================\n"
-    pause
-}
-
-# --- Module 1: Identity & SSH Manager ---
-manage_identity() {
-    while true; do
-        show_header
-        echo -e "${YELLOW}${BOLD}[+] Module 1: Identity, SSH & Remote URL Manager${NC}\n"
-        echo -e "  ${GREEN}[1]${NC} Check / Set Global Git User & Email"
-        echo -e "  ${GREEN}[2]${NC} Generate New SSH Key (ED25519) & Show Public Key"
-        echo -e "  ${GREEN}[3]${NC} Test SSH Connection to GitHub"
-        echo -e "  ${GREEN}[4]${NC} ${BOLD}Inspect & Manage Remote Repository URLs${NC} ${CYAN}(View, Change, Switch HTTPS/SSH)${NC}"
-        echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
-        echo -e "\n===================================================================="
-        read -p "Select choice [1-5]: " ID_CHOICE
-
-        case $ID_CHOICE in
-            1)
-                echo -e "\n${CYAN}Current Configuration:${NC}"
-                echo "  Name:  $(git config --global user.name || echo 'Not set')"
-                echo "  Email: $(git config --global user.email || echo 'Not set')"
-                echo ""
-                read -p "Enter new global user.name (press ENTER to skip): " NEW_NAME
-                read -p "Enter new global user.email (press ENTER to skip): " NEW_EMAIL
-
-                if [[ -n "$NEW_NAME" ]]; then
-                    git config --global user.name "$NEW_NAME"
-                    echo -e "${GREEN}[✔] user.name updated to: $NEW_NAME${NC}"
-                fi
-                if [[ -n "$NEW_EMAIL" ]]; then
-                    git config --global user.email "$NEW_EMAIL"
-                    echo -e "${GREEN}[✔] user.email updated to: $NEW_EMAIL${NC}"
-                fi
-                pause
-                ;;
-            2)
-                if [[ -f ~/.ssh/id_ed25519 ]]; then
-                    echo -e "\n${YELLOW}[!] An ED25519 SSH key already exists at ~/.ssh/id_ed25519${NC}"
-                else
-                    echo -e "\n${GREEN}--> Generating ED25519 SSH Key...${NC}"
-                    EMAIL=$(git config --global user.email || echo "user@github.com")
-                    ssh-keygen -t ed25519 -C "$EMAIL" -f ~/.ssh/id_ed25519 -N ""
-                    echo -e "${GREEN}[✔] SSH Key created!${NC}"
-                fi
-                echo -e "\n${CYAN}Your Public Key (Add this to GitHub -> Settings -> SSH Keys):${NC}"
-                echo -e "${YELLOW}--------------------------------------------------------------------${NC}"
-                cat ~/.ssh/id_ed25519.pub
-                echo -e "${YELLOW}--------------------------------------------------------------------${NC}"
-                pause
-                ;;
-            3)
-                echo -e "\n${GREEN}--> Testing SSH connection to GitHub...${NC}"
-                ssh -T git@github.com || true
-                echo -e "\n${GREEN}[i] Note: 'does not provide shell access' is standard and indicates successful authentication!${NC}"
-                pause
-                ;;
-            4)
-                while true; do
-                    show_header
-                    echo -e "${YELLOW}${BOLD}📌 REMOTE REPOSITORY URL MANAGER${NC}\n"
-                    echo -e "${CYAN}--- Current Configured Remotes (git remote -v) ---${NC}"
-                    GIT_PAGER=cat git remote -v 2>/dev/null || echo "No remotes set."
-                    echo -e "-----------------------------------------------------\n"
-                    echo -e "  ${GREEN}[1]${NC} Change / Set New Remote URL (Overwrite Existing)"
-                    echo -e "  ${GREEN}[2]${NC} Toggle Protocol (Switch between HTTPS and SSH)"
-                    echo -e "  ${GREEN}[3]${NC} Back to Module 1 Menu"
-                    read -p "Select choice [1-3]: " REMOTE_CHOICE
-
-                    case $REMOTE_CHOICE in
-                        1)
-                            echo ""
-                            read -p "Enter fresh GitHub Remote URL (HTTPS or SSH): " RAW_URL
-                            NEW_URL=$(clean_remote_url "$RAW_URL")
-                            if [[ -n "$NEW_URL" ]]; then
-                                git remote remove origin 2>/dev/null || true
-                                git remote add origin "$NEW_URL"
-                                echo -e "${GREEN}[✔] Remote 'origin' updated to: $NEW_URL${NC}"
-                            else
-                                echo -e "${RED}[!] URL cannot be empty!${NC}"
-                            fi
-                            pause
-                            ;;
-                        2)
-                            CURRENT_URL=$(git remote get-url origin 2>/dev/null || echo "")
-                            CURRENT_URL=$(clean_remote_url "$CURRENT_URL")
-
-                            if [[ -z "$CURRENT_URL" ]]; then
-                                echo -e "\n${RED}[!] No 'origin' remote set yet. Use Option [1] to set one first.${NC}"
-                                pause
-                                continue
-                            fi
-
-                            git remote set-url origin "$CURRENT_URL" 2>/dev/null || true
-
-                            if [[ "$CURRENT_URL" =~ ^https://github\.com/([^/]+)/([^/]+)(\.git)?$ ]]; then
-                                USER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
-                                CONVERTED_URL="git@github.com:${USER_REPO}.git"
-                                git remote set-url origin "$CONVERTED_URL"
-                                echo -e "${GREEN}[✔] Switched from HTTPS to SSH: $CONVERTED_URL${NC}"
-                            elif [[ "$CURRENT_URL" =~ ^git@github\.com:([^/]+)/([^/]+)(\.git)?$ ]]; then
-                                USER_REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
-                                CONVERTED_URL="https://github.com/${USER_REPO}.git"
-                                git remote set-url origin "$CONVERTED_URL"
-                                echo -e "${GREEN}[✔] Switched from SSH to HTTPS: $CONVERTED_URL${NC}"
-                            else
-                                echo -e "${RED}[!] Unrecognized URL format. Use Option [1] to re-enter a fresh URL.${NC}"
-                            fi
-                            pause
-                            ;;
-                        3) break ;;
-                        *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
-                    esac
-                done
-                ;;
-            5) break ;;
-            *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
-        esac
-    done
-}
-
-# --- Module 2: Repository Setup, Status & Reset Engine ---
-manage_repo() {
-    while true; do
-        show_header
-        echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup, Status & Reset Engine${NC}"
-        echo -e "${CYAN}💡 Hint: Use Module 1 first if you need to configure your SSH keys or global user info.${NC}\n"
-        echo -e "  ${GREEN}[1]${NC} 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote, Push)"
-        echo -e "  ${GREEN}[2]${NC} Quick Push (Add All -> Commit -> Push)"
-        echo -e "  ${GREEN}[3]${NC} ${BOLD}Inspect Working Directory Status${NC} ${CYAN}(git status)${NC}"
-        echo -e "  ${GREEN}[4]${NC} ${BOLD}Interactive Git Reset & Undo Utility${NC} ${CYAN}(Unstage, Revert, Rollback)${NC}"
-        echo -e "  ${GREEN}[5]${NC} ${BOLD}Smart Conflict Push Resolver${NC} ${RED}(Fixes Rejected Pushes!)${NC}"
-        echo -e "  ${GREEN}[6]${NC} Generate Tailored .gitignore File"
-        echo -e "  ${GREEN}[7]${NC} Back to Main Menu"
-        echo -e "\n===================================================================="
-        read -p "Select choice [1-7]: " REPO_CHOICE
-
-        case $REPO_CHOICE in
-            1)
-                echo -e "\n${GREEN}--> Initializing Git repository...${NC}"
-                git init
-                git branch -M main
-                git add .
-                
-                if [[ -z "$(git status --porcelain)" ]]; then
-                    echo -e "${YELLOW}[i] Working tree clean (nothing new to commit).${NC}"
-                else
-                    read -p "Enter initial commit message [default: Initial commit]: " MSG
-                    MSG=${MSG:-"Initial commit"}
-                    git commit -m "$MSG"
-                fi
-
-                EXISTING_REMOTE=$(git remote get-url origin 2>/dev/null || echo "")
-                echo -e "\n${CYAN}====================================================================${NC}"
-                echo -e "${CYAN}${BOLD}📌 GITHUB REMOTE URL SETUP GUIDELINE${NC}"
-                echo -e "${CYAN}====================================================================${NC}"
-                
-                if [[ -n "$EXISTING_REMOTE" ]]; then
-                    echo -e "${GREEN}[✔] Existing Remote Detected:${NC} $EXISTING_REMOTE"
-                    echo -e "${YELLOW}--> Press [ENTER] to keep this remote and push immediately!${NC}"
-                    echo -e "--> Or paste a NEW URL below to overwrite it.\n"
-                else
-                    echo -e "Enter your GitHub repository URL."
-                    echo -e "Example formats:"
-                    echo -e "  • ${GREEN}SSH (Recommended):${NC}   git@github.com:username/repository.git"
-                    echo -e "  • ${GREEN}HTTPS:${NC}              https://github.com/username/repository.git\n"
-                fi
-
-                read -p "Enter Remote URL (or press ENTER to keep current): " RAW_URL
-                REMOTE_URL=$(clean_remote_url "$RAW_URL")
-
-                if [[ -n "$REMOTE_URL" ]]; then
-                    git remote remove origin 2>/dev/null || true
-                    git remote add origin "$REMOTE_URL"
-                    echo -e "${GREEN}[✔] Remote attached: $REMOTE_URL${NC}"
-                elif [[ -n "$EXISTING_REMOTE" ]]; then
-                    REMOTE_URL="$EXISTING_REMOTE"
-                    echo -e "${GREEN}[✔] Using existing remote: $REMOTE_URL${NC}"
-                fi
-
-                if [[ -n "$REMOTE_URL" ]]; then
-                    echo -e "${GREEN}--> Pushing to origin main...${NC}"
-                    git push -u origin main || echo -e "${YELLOW}[!] Push rejected or refused. Use Option [5] (Smart Conflict Push Resolver) to sync!${NC}"
-                else
-                    echo -e "${YELLOW}[!] No remote URL configured. Add one using Module 1 Option [4] or rerun this option.${NC}"
-                fi
-                pause
-                ;;
-            2)
-                git add .
-                if [[ -z "$(git status --porcelain)" ]]; then
-                    echo -e "${YELLOW}[i] Working tree clean (no new changes to commit).${NC}\n"
-                    show_uptodate_celebration
-                else
-                    read -p "Enter commit message: " MSG
-                    if [[ -z "$MSG" ]]; then
-                        echo -e "${RED}Commit message cannot be empty!${NC}"
-                        pause
-                        continue
-                    fi
-                    git commit -m "$MSG"
-                    BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-                    git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [5] to resolve conflicts!${NC}"
-                fi
-                pause
-                ;;
-            3)
-                show_header
-                echo -e "${YELLOW}${BOLD}📌 WORKING DIRECTORY & STAGING STATUS${NC}\n"
-                BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-                echo -e "Current Active Branch: ${CYAN}$BRANCH${NC}\n"
-                
-                STATUS_OUT=$(git status --porcelain)
-                if [[ -z "$STATUS_OUT" ]]; then
-                    show_uptodate_celebration
-                else
-                    GIT_PAGER=cat git status
-                fi
-                pause
-                ;;
-            4)
-                while true; do
-                    show_header
-                    echo -e "${YELLOW}${BOLD}📌 INTERACTIVE GIT RESET & UNDO UTILITY${NC}\n"
-                    echo -e "  ${GREEN}[1]${NC} Unstage All Files ${CYAN}(Keep modified changes, remove from staging)${NC}"
-                    echo -e "  ${GREEN}[2]${NC} Discard All Uncommitted Local Changes ${RED}(Revert files to last commit)${NC}"
-                    echo -e "  ${GREEN}[3]${NC} Soft Rollback Last Commit ${CYAN}(Undo commit, KEEP changes staged)${NC}"
-                    echo -e "  ${RED}[4]${NC} Hard Rollback Last Commit ${RED}(DESTROY last commit & all changes!)${NC}"
-                    echo -e "  ${GREEN}[5]${NC} Back to Module 2 Menu"
-                    echo -e "\n===================================================================="
-                    read -p "Select choice [1-5]: " RESET_CHOICE
-
-                    case $RESET_CHOICE in
-                        1)
-                            echo -e "\n${GREEN}--> Unstaging all files...${NC}"
-                            git reset HEAD
-                            echo -e "${GREEN}[✔] All staged files reverted to unstaged!${NC}"
-                            pause
-                            ;;
-                        2)
-                            read -p "ARE YOU SURE? This will DISCARD all uncommitted work! (y/N): " CONF
-                            if [[ "$CONF" =~ ^[Yy]$ ]]; then
-                                git checkout -- . 2>/dev/null || true
-                                git clean -fd 2>/dev/null || true
-                                echo -e "${GREEN}[✔] Local working tree wiped clean to last commit state!${NC}"
-                            fi
-                            pause
-                            ;;
-                        3)
-                            echo -e "\n${GREEN}--> Soft rolling back last commit...${NC}"
-                            git reset --soft HEAD~1
-                            echo -e "${GREEN}[✔] Commit undone! Your files remain intact in the staging area.${NC}"
-                            pause
-                            ;;
-                        4)
-                            read -p "CRITICAL WARNING: This will PERMANENTLY ERASE your last commit and work! (y/N): " CONF
-                            if [[ "$CONF" =~ ^[Yy]$ ]]; then
-                                git reset --hard HEAD~1
-                                echo -e "${GREEN}[✔] Hard reset complete. Last commit and work removed.${NC}"
-                            fi
-                            pause
-                            ;;
-                        5) break ;;
-                        *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
-                    esac
-                done
-                ;;
-            5)
-                show_header
-                echo -e "${YELLOW}${BOLD}📌 SMART CONFLICT PUSH RESOLVER ENGINE${NC}\n"
-                BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-                echo -e "Current Branch: ${CYAN}$BRANCH${NC}"
-                echo -e "Choose resolution strategy for remote refusal:\n"
-                echo -e "  ${GREEN}[1]${NC} Safe Pull & Rebase ${CYAN}(Recommended: Appends your commits cleanly)${NC}"
-                echo -e "  ${GREEN}[2]${NC} Safe Pull & Merge ${CYAN}(Allows unrelated histories merge)${NC}"
-                echo -e "  ${RED}[3]${NC} Force Push ${RED}(Overwrites remote with your local code)${NC}"
-                echo -e "  ${GREEN}[4]${NC} Cancel"
-                read -p "Select strategy [1-4]: " STRAT
-
-                case $STRAT in
-                    1)
-                        echo -e "\n${GREEN}--> Pulling remote changes with Rebase...${NC}"
-                        git pull origin "$BRANCH" --rebase
-                        git push origin "$BRANCH"
-                        echo -e "${GREEN}[✔] Successfully synced and pushed!${NC}"
-                        ;;
-                    2)
-                        echo -e "\n${GREEN}--> Pulling remote changes with Merge...${NC}"
-                        git pull origin "$BRANCH" --rebase=false --allow-unrelated-histories
-                        git push origin "$BRANCH"
-                        echo -e "${GREEN}[✔] Successfully merged and pushed!${NC}"
-                        ;;
-                    3)
-                        echo -e "\n${RED}--> Force pushing to remote...${NC}"
-                        git push origin "$BRANCH" --force
-                        echo -e "${GREEN}[✔] Force push complete!${NC}"
-                        ;;
-                    *) echo "Cancelled." ;;
-                esac
-                pause
-                ;;
-            6)
-                echo -e "\nSelect template type for .gitignore:"
-                echo -e "  [1] Python / Django / Flask"
-                echo -e "  [2] Node.js / React / Next.js"
-                echo -e "  [3] Go / Docker / Linux"
-                read -p "Choice [1-3]: " GI_CHOICE
-                case $GI_CHOICE in
-                    1)
-                        cat <<EOF > .gitignore
-__pycache__/
-*.py[cod]
-*$py.class
-venv/
-.env
-.pytest_cache/
-EOF
-                        echo -e "${GREEN}[✔] Python .gitignore created!${NC}"
-                        ;;
-                    2)
-                        cat <<EOF > .gitignore
-node_modules/
-build/
-dist/
-.env
-.env.local
-npm-debug.log*
-EOF
-                        echo -e "${GREEN}[✔] Node.js .gitignore created!${NC}"
-                        ;;
-                    3)
-                        cat <<EOF > .gitignore
-*.exe
-*.o
-*.so
-bin/
-.env
-*.tar.gz
-EOF
-                        echo -e "${GREEN}[✔] Go/Linux .gitignore created!${NC}"
-                        ;;
-                esac
-                pause
-                ;;
-            7) break ;;
-            *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
-        esac
-    done
-}
-
-# --- Module 3: Advanced Branch Manager ---
-select_branch_interactive() {
-    local prompt="$1"
-    local branch_list=$(GIT_PAGER=cat git branch --format="%(refname:short)")
-    
-    if [[ -z "$branch_list" ]]; then
-        echo -e "${RED}[!] No local branches found.${NC}"
-        return 1
-    fi
-
-    local branches=()
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && branches+=("$line")
-    done <<< "$branch_list"
-
-    local selected=0
-    local key=""
-
-    tput civis 2>/dev/null || true
-
-    while true; do
-        show_header
-        echo -e "${YELLOW}${BOLD}$prompt${NC}\n"
-        echo -e "${CYAN}Use UP/DOWN arrow keys to navigate, press [ENTER] to select:${NC}\n"
-
-        for i in "${!branches[@]}"; do
-            if [[ $i -eq $selected ]]; then
-                echo -e "${GREEN}${BOLD}  ➔  ${branches[$i]} (Selected)${NC}"
-            else
-                echo -e "     ${branches[$i]}"
-            fi
-        done
-        echo -e "\n===================================================================="
-
-        read -rsn1 key
-        if [[ $key == $'\x1b' ]]; then
-            read -rsn2 key
-            if [[ $key == "[A" ]]; then
-                ((selected--))
-                if [[ $selected -lt 0 ]]; then selected=$((${#branches[@]} - 1)); fi
-            elif [[ $key == "[B" ]]; then
-                ((selected++))
-                if [[ $selected -ge ${#branches[@]} ]]; then selected=0; fi
-            fi
-        elif [[ $key == "" ]]; then
-            tput cnorm 2>/dev/null || true
-            SELECTED_BRANCH="${branches[$selected]}"
-            return 0
-        fi
-    done
-}
-
-manage_branches() {
-    while true; do
-        show_header
-        echo -e "${YELLOW}${BOLD}[+] Module 3: Advanced Branch & Remote Manager${NC}\n"
-        echo -e "  ${GREEN}[1]${NC} List All Branches (Local & Remote)"
-        echo -e "  ${GREEN}[2]${NC} Create New Branch & Publish to GitHub"
-        echo -e "  ${GREEN}[3]${NC} Switch Branch ${CYAN}(Interactive Arrow-Key Selection)${NC}"
-        echo -e "  ${GREEN}[4]${NC} Delete Branch ${RED}(Interactive Arrow-Key Selection & Purge)${NC}"
-        echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
-        echo -e "\n===================================================================="
-        read -p "Select choice [1-5]: " B_CHOICE
-
-        case $B_CHOICE in
-            1)
-                show_header
-                echo -e "${CYAN}${BOLD}--- Local Branches ---${NC}"
-                GIT_PAGER=cat git branch -vv
-                echo -e "\n${CYAN}${BOLD}--- Remote Branches ---${NC}"
-                GIT_PAGER=cat git branch -r
-                pause
-                ;;
-            2)
-                read -p "Enter new branch name: " NEW_B
-                if [[ -n "$NEW_B" ]]; then
-                    git checkout -b "$NEW_B"
-                    echo -e "${GREEN}--> Publishing '$NEW_B' to GitHub...${NC}"
-                    git push -u origin "$NEW_B"
-                    echo -e "${GREEN}[✔] Branch created and tracked on GitHub!${NC}"
-                fi
-                pause
-                ;;
-            3)
-                if select_branch_interactive "📌 SELECT BRANCH TO SWITCH"; then
-                    echo -e "\n${GREEN}--> Switching to branch '$SELECTED_BRANCH'...${NC}"
-                    git checkout "$SELECTED_BRANCH"
-                fi
-                pause
-                ;;
-            4)
-                if select_branch_interactive "📌 SELECT BRANCH TO PURGE (LOCAL & REMOTE)"; then
-                    CURRENT_B=$(git rev-parse --abbrev-ref HEAD)
-                    if [[ "$SELECTED_BRANCH" == "$CURRENT_B" ]]; then
-                        echo -e "\n${RED}[!] Cannot delete active branch '$CURRENT_B'. Switch to another branch first!${NC}"
-                    else
-                        echo ""
-                        read -p "Are you SURE you want to delete '$SELECTED_BRANCH' everywhere? (y/N): " CONF
-                        if [[ "$CONF" =~ ^[Yy]$ ]]; then
-                            git branch -D "$SELECTED_BRANCH" 2>/dev/null || true
-                            git push origin --delete "$SELECTED_BRANCH" 2>/dev/null || true
-                            echo -e "${GREEN}[✔] Branch '$SELECTED_BRANCH' purged successfully!${NC}"
-                        fi
-                    fi
-                fi
-                pause
-                ;;
-            5) break ;;
-            *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
-        esac
-    done
-}
-
-# --- Module 4: Conventional Commit Assistant ---
+# --- Module 5: Conventional Commit Assistant ---
 commit_assistant() {
     show_header
-    echo -e "${YELLOW}${BOLD}[+] Module 4: Conventional Commit Crafting Assistant${NC}\n"
+    echo -e "${YELLOW}${BOLD}📝 CONVENTIONAL COMMIT CRAFTING ASSISTANT${NC}\n"
     echo -e "Select commit classification:"
     echo -e "  ${GREEN}[1] feat:${NC}     A new feature for users"
     echo -e "  ${GREEN}[2] fix:${NC}      A bug fix"
     echo -e "  ${GREEN}[3] docs:${NC}     Documentation changes only"
     echo -e "  ${GREEN}[4] refactor:${NC} Code restructuring without logic change"
     echo -e "  ${GREEN}[5] chore:${NC}    Build process or dependency updates"
-    read -p "Select choice [1-5]: " C_TYPE
+    read -rp "Select choice [1-5]: " C_TYPE
 
-    PREFIX=""
+    local prefix=""
     case $C_TYPE in
-        1) PREFIX="feat" ;;
-        2) PREFIX="fix" ;;
-        3) PREFIX="docs" ;;
-        4) PREFIX="refactor" ;;
-        5) PREFIX="chore" ;;
+        1) prefix="feat" ;;
+        2) prefix="fix" ;;
+        3) prefix="docs" ;;
+        4) prefix="refactor" ;;
+        5) prefix="chore" ;;
         *) echo "Cancelled."; return ;;
     esac
 
-    read -p "Enter short scope (optional, e.g. auth, api): " SCOPE
-    read -p "Enter clear commit description: " DESC
+    read -rp "Enter short scope (optional, e.g. auth, api): " SCOPE
+    read -rp "Enter clear commit description: " DESC
 
-    if [[ -z "$DESC" ]]; then
+    if [ -z "$DESC" ]; then
         echo -e "${RED}Description required!${NC}"
         pause
         return
     fi
 
-    if [[ -n "$SCOPE" ]]; then
-        FINAL_MSG="${PREFIX}(${SCOPE}): ${DESC}"
+    local final_msg=""
+    if [ -n "$SCOPE" ]; then
+        final_msg="${prefix}(${SCOPE}): ${DESC}"
     else
-        FINAL_MSG="${PREFIX}: ${DESC}"
+        final_msg="${prefix}: ${DESC}"
     fi
 
-    echo -e "\n${CYAN}Crafted Commit Message:${NC} ${BOLD}$FINAL_MSG${NC}"
-    read -p "Execute commit now? (y/N): " DO_COMMIT
+    echo -e "\n${CYAN}Crafted Commit Message:${NC} ${BOLD}$final_msg${NC}"
+    read -rp "Execute commit now? (y/N): " DO_COMMIT
     if [[ "$DO_COMMIT" =~ ^[Yy]$ ]]; then
-        git add .
-        git commit -m "$FINAL_MSG"
-        echo -e "${GREEN}[✔] Conventional commit created!${NC}"
+        if [ "$GW_DRY_RUN" = "true" ]; then
+            echo -e "${YELLOW}[DRY-RUN] Would run: git add . && git commit -m \"$final_msg\"${NC}"
+        else
+            git add .
+            git commit -m "$final_msg"
+            echo -e "${GREEN}[✔] Conventional commit created!${NC}"
+        fi
     fi
     pause
+}
+
+# --- Module 6: History & Diff Inspector ---
+history_inspector() {
+    show_header
+    echo -e "${YELLOW}${BOLD}📊 VISUAL COMMIT HISTORY & DIFF INSPECTOR${NC}\n"
+    echo -e "  ${GREEN}[1]${NC} View Visual Commit Graph Tree"
+    echo -e "  ${GREEN}[2]${NC} View Working Directory Changes (${BOLD}git diff${NC})"
+    echo -e "  ${GREEN}[3]${NC} View Last Commit Detailed Summary"
+    read -rp "Select choice [1-3]: " H_CHOICE
+
+    case $H_CHOICE in
+        1)
+            show_header
+            git log --graph --oneline --decorate --all -n 20 | $(get_pager)
+            pause
+            ;;
+        2)
+            show_header
+            git diff | $(get_pager)
+            pause
+            ;;
+        3)
+            show_header
+            git show HEAD | $(get_pager)
+            pause
+            ;;
+        *) echo "Cancelled."; pause ;;
+    esac
+}
+
+# --- Module 7: Settings & Toggles Suite ---
+settings_suite() {
+    show_header
+    echo -e "${YELLOW}${BOLD}⚙️ GIT-WIZARD SETTINGS & TOGGLES SUITE${NC}\n"
+    echo -e "  ${GREEN}[1]${NC} Toggle Mode (${CYAN}Beginner${NC} vs ${CYAN}Enterprise${NC}) [Current: $GW_MODE]"
+    echo -e "  ${GREEN}[2]${NC} Toggle Dry-Run Mode [Current: $GW_DRY_RUN]"
+    echo -e "  ${GREEN}[3]${NC} Toggle Live Background Sync Watcher [Current: $GW_WATCHER]"
+    echo -e "  ${GREEN}[4]${NC} Back to Main Menu"
+    read -rp "Select choice [1-4]: " S_CHOICE
+
+    case $S_CHOICE in
+        1)
+            if [ "$GW_MODE" = "Enterprise" ]; then GW_MODE="Beginner"; else GW_MODE="Enterprise"; fi
+            ;;
+        2)
+            if [ "$GW_DRY_RUN" = "true" ]; then GW_DRY_RUN=false; else GW_DRY_RUN=true; fi
+            ;;
+        3)
+            if [ "$GW_WATCHER" = "true" ]; then GW_WATCHER=false; else GW_WATCHER=true; fi
+            ;;
+        4) return ;;
+    esac
+    save_state
+    echo -e "${GREEN}[✔] Settings updated successfully!${NC}"
+    sleep 1
 }
 
 # --- Main Master Loop ---
@@ -761,22 +588,28 @@ while true; do
     check_git_repo
     show_header
     echo -e "Main Capabilities Suite:\n"
-    echo -e "  ${GREEN}[1]${NC} Identity & SSH Manager ${CYAN}(Config, Keys, Connections, Remotes)${NC}"
-    echo -e "  ${GREEN}[2]${NC} Repository & Smart Push Engine ${CYAN}(Init, Status, Reset, Conflict Resolver)${NC}"
-    echo -e "  ${GREEN}[3]${NC} Advanced Branch Manager ${CYAN}(Local/Remote Sync & Dual Delete)${NC}"
-    echo -e "  ${GREEN}[4]${NC} Conventional Commit Assistant ${CYAN}(Professional Formatting)${NC}"
-    echo -e "  ${YELLOW}${BOLD}[5] ⚡ Enable Universal Global CLI (Run 'git-wizard' from ANY Folder)${NC}"
-    echo -e "  ${GREEN}[6]${NC} Exit"
+    echo -e "  ${GREEN}[1]${NC} 🔄 Linear Solo Mode ${CYAN}(Stage, Commit & Push in 1-Click)${NC}"
+    echo -e "  ${GREEN}[2]${NC} 🌿 Enterprise Team Mode ${CYAN}(Create Feature/Bugfix Branch & Push)${NC}"
+    echo -e "  ${GREEN}[3]${NC} ⚡ Safe Upstream Sync ${CYAN}(Stash-Protected Pull & Rebase)${NC}"
+    echo -e "  ${GREEN}[4]${NC} 🔀 Admin Merge & Release Center ${CYAN}(PR Review & Production Merge)${NC}"
+    echo -e "  ${GREEN}[5]${NC} 📝 Conventional Commit Assistant ${CYAN}(Enterprise Formatting)${NC}"
+    echo -e "  ${GREEN}[6]${NC} 📊 Visual History & Diff Inspector ${CYAN}(Graph Tree & Delta Pager)${NC}"
+    echo -e "  ${GREEN}[7]${NC} ⚙️ Settings, Toggles & Dry-Run ${CYAN}([M] Mode / [D] Dry-Run / Watcher)${NC}"
+    echo -e "  ${YELLOW}${BOLD}[8] ⚡ Enable Universal Global CLI (Install 'git-wizard' & Managed Block)${NC}"
+    echo -e "  ${GREEN}[9]${NC} Exit"
     echo -e "\n===================================================================="
-    read -p "Enter choice [1-6]: " MAIN_CHOICE
+    read -rp "Enter choice [1-9]: " MAIN_CHOICE
 
     case $MAIN_CHOICE in
-        1) manage_identity ;;
-        2) manage_repo ;;
-        3) manage_branches ;;
-        4) commit_assistant ;;
-        5) enable_global_cli ;;
-        6) echo -e "\n${GREEN}Keep building amazing open-source software! Goodbye!${NC}"; exit 0 ;;
+        1) linear_solo_mode ;;
+        2) enterprise_team_mode ;;
+        3) safe_upstream_sync ;;
+        4) admin_merge_center ;;
+        5) commit_assistant ;;
+        6) history_inspector ;;
+        7) settings_suite ;;
+        8) enable_global_cli ;;
+        9) echo -e "\n${GREEN}Make your repository a masterpiece! Goodbye!${NC}"; exit 0 ;;
         *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
     esac
 done
