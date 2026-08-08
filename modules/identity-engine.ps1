@@ -1,5 +1,5 @@
 # ==============================================================================
-# ENGINE NAME: identity-engine.ps1 (PowerShell 5.1 Clean Edition)
+# ENGINE NAME: identity-engine.ps1 (PowerShell 5.1 Clean Edition - Back Fixed)
 # ==============================================================================
 
 function Clean-RemoteUrl ($url) {
@@ -122,7 +122,7 @@ function Manage-Identity {
                     }
                 }
             }
-            "5" { break }
+            "5" { return }
             default { Write-Host "Invalid selection!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
         }
     }
