@@ -1,9 +1,10 @@
 # ==============================================================================
-# ENGINE NAME: repo-engine.ps1 (PowerShell 5.1 Clean Edition - V2.0 Gold Standard)
+# ENGINE NAME: repo-engine.ps1 (PowerShell 5.1 Clean Edition - V2.1 Gold Standard)
 # NEW IN V2.0: Force Sync with Origin (nuclear reset recovery), destructive
 #              operations routed through Invoke-GitWizard/New-SafetyBackup/
 #              Confirm-DestructiveAction from git-wizard.ps1 for Dry-Run and
 #              automatic safety-backup support.
+# NEW IN V2.1: Back=0 convention.
 # ==============================================================================
 
 function Manage-Repo {
@@ -11,58 +12,21 @@ function Manage-Repo {
         Show-Header
         Write-Host "  [+] Module 2: Repository Setup, Status and Reset Engine`n" -ForegroundColor Yellow
         Write-Host "  [1] 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote, Push)" -ForegroundColor Green
-        Write-Host "  [2] Quick Push (Add All -> Commit -> Push)" -ForegroundColor Green
-        Write-Host "  [3] Inspect Working Directory Status (git status)" -ForegroundColor Green
-        Write-Host "  [4] Interactive Git Reset and Undo Utility" -ForegroundColor Green
-        Write-Host "  [5] Smart Conflict Push Resolver" -ForegroundColor Green
-        Write-Host "  [6] Generate Tailored .gitignore File" -ForegroundColor Green
-        Write-Host "  [7] Back to Main Menu" -ForegroundColor Green
+        Write-Host "  [2] 1-Click Complete Repo Destroy" -ForegroundColor Red
+        Write-Host "  [3] Quick Push (Add All -> Commit -> Push)" -ForegroundColor Green
+        Write-Host "  [4] Inspect Working Directory Status (git status)" -ForegroundColor Green
+        Write-Host "  [5] Interactive Git Reset and Undo Utility" -ForegroundColor Green
+        Write-Host "  [6] Smart Conflict Push Resolver" -ForegroundColor Green
+        Write-Host "  [7] Generate Tailored .gitignore File" -ForegroundColor Green
+        Write-Host "  [0] Back to Main Menu" -ForegroundColor Green
         Write-Host "`n====================================================================" -ForegroundColor Cyan
 
-        $choice = Read-Host "Select choice [1-7]"
+        $choice = Read-Host "Select choice [0-7]"
 
         switch ($choice) {
-            "1" {
-                Write-Host "`n--> Initializing Git repository..." -ForegroundColor Green
-                Invoke-GitWizard init | Out-Null
-                Invoke-GitWizard branch -M main | Out-Null
-                Invoke-GitWizard add . | Out-Null
-                $status = git status --porcelain
-                if (-not $status) {
-                    Write-Host "[i] Working tree clean (nothing new to commit)." -ForegroundColor Yellow
-                } else {
-                    $msg = Read-Host "Enter initial commit message [default: Initial commit]"
-                    if (-not $msg) { $msg = "Initial commit" }
-                    Invoke-GitWizard commit -m "$msg" | Out-Null
-                }
-
-                $existing = git remote get-url origin 2>$null
-                Write-Host "`nGITHUB REMOTE URL SETUP" -ForegroundColor Cyan
-                if ($existing) {
-                    Write-Host "[+] Existing Remote Detected: $existing" -ForegroundColor Green
-                    $rawUrl = Read-Host "Enter Remote URL (press ENTER to keep current)"
-                } else {
-                    $rawUrl = Read-Host "Enter GitHub Remote URL (HTTPS or SSH)"
-                }
-
-                $remoteUrl = Clean-RemoteUrl -url $rawUrl
-                if ($remoteUrl) {
-                    git remote remove origin 2>$null
-                    git remote add origin "$remoteUrl"
-                    Write-Host "[+] Remote attached: $remoteUrl" -ForegroundColor Green
-                } elseif ($existing) {
-                    $remoteUrl = $existing
-                }
-
-                if ($remoteUrl) {
-                    Write-Host "--> Pushing to origin main..." -ForegroundColor Green
-                    if (-not (Invoke-GitWizard push -u origin main)) {
-                        Write-Host "[!] Push rejected or failed. Use Option [5] (Smart Conflict Push Resolver) to sync!" -ForegroundColor Yellow
-                    }
-                }
-                Pause-Console
-            }
-            "2" {
+            "1" { Invoke-OneClickRepoSetup }
+            "2" { Invoke-OneClickRepoDestroy }
+            "3" {
                 Invoke-GitWizard add . | Out-Null
                 $status = git status --porcelain
                 if (-not $status) {
@@ -79,12 +43,12 @@ function Manage-Repo {
                     $branch = git rev-parse --abbrev-ref HEAD 2>$null
                     if (-not $branch) { $branch = "main" }
                     if (-not (Invoke-GitWizard push origin "$branch")) {
-                        Write-Host "[!] Push rejected. Use Option [5] to resolve." -ForegroundColor Yellow
+                        Write-Host "[!] Push rejected. Use Option [6] to resolve." -ForegroundColor Yellow
                     }
                 }
                 Pause-Console
             }
-            "3" {
+            "4" {
                 Show-Header
                 Write-Host "WORKING DIRECTORY AND STAGING STATUS`n" -ForegroundColor Yellow
                 $branch = git rev-parse --abbrev-ref HEAD 2>$null
@@ -97,7 +61,7 @@ function Manage-Repo {
                 }
                 Pause-Console
             }
-            "4" {
+            "5" {
                 while ($true) {
                     Show-Header
                     Write-Host "INTERACTIVE GIT RESET AND UNDO UTILITY`n" -ForegroundColor Yellow
@@ -107,9 +71,9 @@ function Manage-Repo {
                     Write-Host "  [4] Hard Rollback Last Commit (DESTROY last commit)" -ForegroundColor Red
                     Write-Host "  [5] Force Sync with Origin (Nuclear reset - matches GitHub exactly!)" -ForegroundColor Red
                     Write-Host "      Use this when your local branch is badly tangled/diverged and you just want it to match origin/main exactly." -ForegroundColor Cyan
-                    Write-Host "  [6] Back to Module 2 Menu" -ForegroundColor Green
+                    Write-Host "  [0] Back to Module 2 Menu" -ForegroundColor Green
 
-                    $resetChoice = Read-Host "Select choice [1-6]"
+                    $resetChoice = Read-Host "Select choice [0-5]"
                     if ($resetChoice -eq "1") {
                         Invoke-GitWizard reset HEAD | Out-Null
                         Write-Host "[+] All staged files reverted to unstaged!" -ForegroundColor Green
@@ -135,20 +99,21 @@ function Manage-Repo {
                         Pause-Console
                     } elseif ($resetChoice -eq "5") {
                         Invoke-ForceSyncWithOrigin
-                    } elseif ($resetChoice -eq "6") { return }
+                    } elseif ($resetChoice -eq "0") { return }
                 }
             }
-            "5" {
+            "6" {
                 Show-Header
                 Write-Host "SMART CONFLICT PUSH RESOLVER`n" -ForegroundColor Yellow
                 $branch = git rev-parse --abbrev-ref HEAD 2>$null
                 Write-Host "Current Branch: $branch" -ForegroundColor Cyan
                 Write-Host "  [1] Safe Pull and Rebase" -ForegroundColor Green
                 Write-Host "  [2] Safe Pull and Merge" -ForegroundColor Green
-                Write-Host "  [3] Force Push" -ForegroundColor Red
-                Write-Host "  [4] Cancel" -ForegroundColor Green
+                Write-Host "  [3] Force Push (Overwrites remote!)" -ForegroundColor Red
+                Write-Host "  [4] Force Pull (Overwrites local!)" -ForegroundColor Red
+                Write-Host "  [0] Cancel" -ForegroundColor Green
 
-                $strat = Read-Host "Select strategy [1-4]"
+                $strat = Read-Host "Select strategy [0-4]"
                 if ($strat -eq "1") {
                     if (Invoke-GitWizard pull origin "$branch" --rebase) {
                         if (Invoke-GitWizard push origin "$branch") {
@@ -178,10 +143,21 @@ function Manage-Repo {
                             Write-Host "[!] Force push failed. Check your remote/connection." -ForegroundColor Red
                         }
                     }
+                } elseif ($strat -eq "4") {
+                    if (Confirm-DestructiveAction "Force pull - overwrites local branch '$branch' with origin/$branch") {
+                        New-SafetyBackup "pre-force-pull"
+                        if (Invoke-GitWizard fetch origin) {
+                            Invoke-GitWizard reset --hard "origin/$branch" | Out-Null
+                            Invoke-GitWizard clean -fd | Out-Null
+                            Write-Host "[+] Local branch now matches origin/$branch." -ForegroundColor Green
+                        } else {
+                            Write-Host "[!] Fetch failed. Aborting - nothing was reset." -ForegroundColor Red
+                        }
+                    }
                 }
                 Pause-Console
             }
-            "6" {
+            "7" {
                 Write-Host "Select template for .gitignore:"
                 Write-Host "  [1] Python / Django / Flask"
                 Write-Host "  [2] Node.js / React / Next.js"
@@ -202,10 +178,281 @@ function Manage-Repo {
                 }
                 Pause-Console
             }
-            "7" { return }
+            "0" { return }
             default { Write-Host "Invalid selection!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
         }
     }
+}
+# ==============================================================================
+# 1-CLICK COMPLETE REPO SETUP
+# Creates the repo on the Git host itself (GitHub/GitLab) using the folder
+# name by default, so the push always matches. Falls back to manual remote
+# entry if the host CLI isn't available/authenticated.
+# Relies on globals from git-wizard.ps1 (Invoke-GitWizard, Pause-Console,
+# Show-Header) and vcs-engine.ps1 (Confirm-VcsReady, Vcs-CreateRepo,
+# Vcs-GetRepoUrl, Vcs-MyUsername, $Global:VcsProvider, $Global:DryRun).
+# ==============================================================================
+function Invoke-OneClickRepoSetup {
+    Show-Header
+    Write-Host "1-CLICK COMPLETE REPO SETUP`n" -ForegroundColor Yellow
+
+    $folderName = Split-Path -Leaf (Get-Location)
+    Write-Host "Folder detected: $folderName" -ForegroundColor Cyan
+    Write-Host "This repo will be created on your Git host using this exact name," -ForegroundColor Cyan
+    Write-Host "so the push always matches.`n" -ForegroundColor Cyan
+
+    if (-not (git rev-parse --is-inside-work-tree 2>$null)) {
+        Invoke-GitWizard init | Out-Null
+        Invoke-GitWizard branch -M main | Out-Null
+    }
+
+    if (-not (Confirm-VcsReady)) {
+        Write-Host "[i] Couldn't set up the Git host CLI. Falling back to manual remote entry." -ForegroundColor Yellow
+        Invoke-GitWizard add . | Out-Null
+        if (git status --porcelain) {
+            $msg = Read-Host "Commit message [default: Initial commit]"
+            if (-not $msg) { $msg = "Initial commit" }
+            Invoke-GitWizard commit -m "$msg" | Out-Null
+        }
+        $rawUrl = Read-Host "Enter Remote URL (or ENTER to keep current)"
+        $remoteUrl = Clean-RemoteUrl -url $rawUrl
+        if ($remoteUrl) {
+            git remote remove origin 2>$null
+            git remote add origin "$remoteUrl"
+        }
+        if (-not (Invoke-GitWizard push -u origin main)) {
+            Write-Host "[!] Push rejected. Use Option [6] to resolve." -ForegroundColor Yellow
+        }
+        Pause-Console
+        return
+    }
+
+    $customName = Read-Host "Repo name [ENTER to use folder name '$folderName']"
+    $repoName = if ($customName) { $customName } else { $folderName }
+    Write-Host "  [1] Public  [2] Private"
+    $visChoice = Read-Host "Visibility [1-2, default 1]"
+    $vis = if ($visChoice -eq "2") { "private" } else { "public" }
+
+    Write-Host "`n--> Creating '$repoName' ($vis) on $Global:VcsProvider..." -ForegroundColor Cyan
+    if ($Global:DryRun) {
+        Write-Host "[DRY-RUN] Would create $Global:VcsProvider repo: $repoName ($vis)" -ForegroundColor Yellow
+    } else {
+        Vcs-CreateRepo -name $repoName -visibility $vis
+    }
+
+    Invoke-GitWizard add . | Out-Null
+    if (git status --porcelain) {
+        $msg = Read-Host "Commit message [default: Initial commit]"
+        if (-not $msg) { $msg = "Initial commit" }
+        Invoke-GitWizard commit -m "$msg" | Out-Null
+    } else {
+        Write-Host "[i] Nothing to commit." -ForegroundColor Yellow
+    }
+
+    # =========================================================================
+    # AUTO-DETECT REMOTE URL — two methods, then manual fallback as last resort
+    # =========================================================================
+    $sshUrl   = $null
+    $httpsUrl = $null
+    $detectedUser = $null
+
+    # --- Method 1: Try the VCS abstraction functions (vcs-engine.ps1) ---
+    $unameResult = Vcs-MyUsername
+    if ($unameResult) {
+        $detectedUser = $unameResult
+        $fullName = "$unameResult/$repoName"
+        $urlPair = Vcs-GetRepoUrl -repo $fullName
+        if ($urlPair) {
+            $sshUrl   = ($urlPair -split '\|')[0]
+            $httpsUrl = ($urlPair -split '\|')[1]
+        }
+    }
+
+        # --- Method 2: Direct API call if VCS functions returned nothing ---
+    if (-not $sshUrl -and -not $httpsUrl) {
+        if ($Global:VcsProvider -eq "github") {
+            $directUser = & gh api user --jq '.login' 2>$null
+            if ($directUser) {
+                $detectedUser = $directUser
+                $sshUrl   = "git@github.com:${directUser}/${repoName}.git"
+                $httpsUrl = "https://github.com/${directUser}/${repoName}.git"
+            }
+        } elseif ($Global:VcsProvider -eq "gitlab") {
+            $directUser = & glab api user --jq '.username' 2>$null
+            if ($directUser) {
+                $detectedUser = $directUser
+                $sshUrl   = "git@gitlab.com:${directUser}/${repoName}.git"
+                $httpsUrl = "https://gitlab.com/${directUser}/${repoName}.git"
+            }
+        }
+    }
+    # --- If either method worked, let user pick SSH vs HTTPS ---
+    if ($sshUrl -or $httpsUrl) {
+        Write-Host "`nWhich URL protocol would you like to push with?" -ForegroundColor Cyan
+        Write-Host "  [1] SSH   ($sshUrl)" -ForegroundColor Green
+        Write-Host "  [2] HTTPS ($httpsUrl)" -ForegroundColor Green
+        $protoChoice = Read-Host "Choice [1-2, default 1]"
+        $chosenUrl = if ($protoChoice -eq "2") { $httpsUrl } else { $sshUrl }
+        git remote remove origin 2>$null
+        git remote add origin "$chosenUrl"
+        Write-Host "[+] Remote origin set to: $chosenUrl" -ForegroundColor Green
+    }
+
+    # --- Absolute last resort: manual paste (only fires if BOTH methods failed) ---
+    if (-not (git remote get-url origin 2>$null)) {
+        Write-Host ""
+        $rawUrl = Read-Host "Couldn't auto-detect the new repo's URL. Paste it manually"
+        $remoteUrl = Clean-RemoteUrl -url $rawUrl
+        if ($remoteUrl) {
+            git remote remove origin 2>$null
+            git remote add origin "$remoteUrl"
+        }
+    }
+
+    Invoke-GitWizard branch -M main | Out-Null
+    if (Invoke-GitWizard push -u origin main) {
+        Write-Host ""
+        Write-Host "====================================================================" -ForegroundColor Green
+        Write-Host "  [OK] 1-CLICK REPO SETUP COMPLETE!" -ForegroundColor Green
+        Write-Host "====================================================================" -ForegroundColor Green
+        $finalUrl = git remote get-url origin 2>$null
+        if ($finalUrl) { Write-Host "  Remote : $finalUrl" -ForegroundColor Cyan }
+        if ($detectedUser) {
+            $browseUrl = "https://$($Global:VcsProvider).com/${detectedUser}/${repoName}"
+            Write-Host "  Browse : $browseUrl" -ForegroundColor Cyan
+        }
+        Write-Host "====================================================================" -ForegroundColor Green
+    } else {
+        Write-Host "[!] Push rejected. Use Option [6] Smart Conflict Push Resolver." -ForegroundColor Yellow
+    }
+    Pause-Console
+}
+# ==============================================================================
+# 1-CLICK COMPLETE REPO DESTROY
+# Detects the remote repo from THIS folder's 'origin' (works from any folder
+# that has a git-wizard-initialized repo, GitHub or GitLab, SSH or HTTPS),
+# then deletes it on the host via Vcs-DeleteRepo. Mirrors the Linux
+# one_click_repo_destroy function.
+# ==============================================================================
+function Get-OwnerRepoFromUrl {
+    param([string]$Url)
+    if (-not $Url) { return "" }
+    if ($Url -match '^git@[^:]+:([^/]+)/(.+?)(\.git)?$') {
+        return "$($Matches[1])/$($Matches[2])"
+    }
+    if ($Url -match '^https?://[^/]+/([^/]+)/(.+?)(\.git)?$') {
+        return "$($Matches[1])/$($Matches[2])"
+    }
+    return ""
+}
+function Invoke-OneClickRepoDestroy {
+    Show-Header
+    Write-Host "1-CLICK COMPLETE REPO DESTROY`n" -ForegroundColor Red
+
+    $IsRepo = git rev-parse --is-inside-work-tree 2>$null
+    if ($IsRepo -ne "true") {
+        Write-Host "[!] '$TargetRepoDir' is not a Git repository - nothing to detect here." -ForegroundColor Red
+        Pause-Console
+        return
+    }
+    $originUrl = git remote get-url origin 2>$null
+    if (-not $originUrl) {
+        Write-Host "[!] No 'origin' remote set on this folder - can't tell which remote repo to destroy." -ForegroundColor Red
+        Pause-Console
+        return
+    }
+
+    if (-not (Confirm-VcsProvider)) {
+        Pause-Console
+        return
+    }
+
+    $fullName = Get-OwnerRepoFromUrl -Url $originUrl
+    if (-not $fullName) {
+        Write-Host "[!] Couldn't parse an owner/repo out of: $originUrl" -ForegroundColor Red
+        Pause-Console
+        return
+    }
+
+    Write-Host "Detected remote repo: $fullName ($($Global:VcsProvider))" -ForegroundColor Cyan
+    Write-Host "Local folder: $TargetRepoDir`n" -ForegroundColor Cyan
+
+    if (-not (Confirm-VcsReady)) {
+        Pause-Console
+        return
+    }
+
+    if (-not (Confirm-DestructiveAction "PERMANENTLY DELETE '$fullName' from $($Global:VcsProvider) - this cannot be undone")) {
+        Write-Host "[i] Cancelled - nothing was destroyed." -ForegroundColor Yellow
+        Pause-Console
+        return
+    }
+
+    if ($Global:DryRun) {
+        Write-Host "[DRY-RUN] Would delete remote repo: $fullName" -ForegroundColor Yellow
+    } else {
+        # -----------------------------------------------------------------
+        # Attempt 1: Delete the repo
+        # -----------------------------------------------------------------
+        $delOut = Vcs-DeleteRepo $fullName 2>&1
+        $delCode = $LASTEXITCODE
+        $delStr  = "$delOut"
+
+        # -----------------------------------------------------------------
+        # Auto-fix: If 403 + missing delete_repo scope, refresh auth & retry
+        # -----------------------------------------------------------------
+        if (($delCode -ne 0 -and $null -ne $delCode) -and
+            ($delStr -match "delete_repo|scope|403|admin rights")) {
+
+            Write-Host ""
+            Write-Host "[!] Permission denied — your 'gh' login is missing the 'delete_repo' scope." -ForegroundColor Yellow
+            Write-Host "    This is normal; GitHub doesn't request it by default." -ForegroundColor Yellow
+            $fixIt = Read-Host "    Run 'gh auth refresh -s delete_repo' now to fix it? (Y/n)"
+            if ($fixIt -notmatch '^[Nn]') {
+                Write-Host "`n[+] Requesting delete_repo scope from GitHub..." -ForegroundColor Cyan
+                & gh auth refresh -h github.com -s delete_repo 2>&1 | ForEach-Object { Write-Host "    $_" }
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "[+] Scope granted! Retrying delete..." -ForegroundColor Green
+                    # Small breather so the token update propagates
+                    Start-Sleep -Seconds 2
+                    $delOut = Vcs-DeleteRepo $fullName 2>&1
+                    $delCode = $LASTEXITCODE
+                    $delStr  = "$delOut"
+                } else {
+                    Write-Host "[!] Auth refresh failed — cannot delete." -ForegroundColor Red
+                    Pause-Console
+                    return
+                }
+            } else {
+                Write-Host "[i] Cancelled. Run this manually when ready:" -ForegroundColor Yellow
+                Write-Host "    gh auth refresh -h github.com -s delete_repo" -ForegroundColor Cyan
+                Pause-Console
+                return
+            }
+        }
+
+        # -----------------------------------------------------------------
+        # Final result check (covers both first-attempt and retry)
+        # -----------------------------------------------------------------
+        if ($delCode -ne 0 -and $null -ne $delCode) {
+            Write-Host "[!] Delete failed:" -ForegroundColor Red
+            $delOut | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+            Pause-Console
+            return
+        }
+
+        Write-Host "[+] Deleted '$fullName' from $($Global:VcsProvider)." -ForegroundColor Green
+        if (Get-Command Write-WizardActionLog -ErrorAction SilentlyContinue) {
+            Write-WizardActionLog "DESTROYED remote repo: $fullName ($($Global:VcsProvider)) via 1-click destroy"
+        }
+    }
+
+    $rmOrigin = Read-Host "Also remove the local 'origin' remote link here (keeps your local files/history)? (y/N)"
+    if ($rmOrigin -match '^[Yy]$') {
+        git remote remove origin 2>$null
+        Write-Host "[+] Local 'origin' remote removed." -ForegroundColor Green
+    }
+    Pause-Console
 }
 
 # ==============================================================================

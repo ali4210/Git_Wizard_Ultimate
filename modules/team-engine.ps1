@@ -8,42 +8,17 @@
 #               into global scope before this file loads): Invoke-GitWizard,
 #               New-SafetyBackup, Confirm-DestructiveAction, Show-Header,
 #               Pause-Console, Write-WizardActionLog.
+# V2.1:         Back=0 convention across all three submenus in this file.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# Arrow-key selector for LOCAL branches
+# NOTE: The local-branch arrow-key selector (Select-BranchInteractive) lives in
+# branch-engine.ps1 and is reused here — it used to be duplicated in this file
+# with an incompatible parameter signature (-Prompt vs branch-engine's
+# positional $menuTitle), which meant whichever module loaded last silently
+# shadowed the other. Removed here; call sites below use the shared one via
+# Select-BranchInteractive "some title" (positional, matching branch-engine.ps1).
 # ------------------------------------------------------------------------------
-function Select-BranchInteractive {
-    param([string]$Prompt)
-
-    $Branches = @(git branch --format="%(refname:short)")
-    if (-not $Branches -or $Branches.Count -eq 0) {
-        Write-Host "[!] No local branches found." -ForegroundColor Red
-        return $null
-    }
-
-    $Selected = 0
-    while ($true) {
-        Show-Header
-        Write-Host "$Prompt`n" -ForegroundColor Yellow
-        for ($i = 0; $i -lt $Branches.Count; $i++) {
-            if ($i -eq $Selected) {
-                Write-Host "  >  $($Branches[$i]) (Selected)" -ForegroundColor Green
-            } else {
-                Write-Host "     $($Branches[$i])"
-            }
-        }
-        Write-Host "`n[UP/DOWN to navigate, ENTER to select, Q to cancel]" -ForegroundColor Cyan
-
-        $Key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-        switch ($Key.VirtualKeyCode) {
-            38 { if ($Selected -gt 0) { $Selected-- } else { $Selected = $Branches.Count - 1 } } # Up
-            40 { if ($Selected -lt ($Branches.Count - 1)) { $Selected++ } else { $Selected = 0 } } # Down
-            13 { return $Branches[$Selected] } # Enter
-            81 { return $null } # Q
-        }
-    }
-}
 
 # ------------------------------------------------------------------------------
 # Arrow-key selector for REMOTE branches, with author/date/message per row
@@ -189,8 +164,8 @@ function Invoke-TeamModeAdminDashboard {
     Write-Host "--- Diff vs main for origin/$ReviewBranch ---`n" -ForegroundColor Cyan
     git diff "main...origin/$ReviewBranch"
 
-    Write-Host "`n  [1] Merge into main   [2] Reject (skip, no changes)   [3] Cancel"
-    $MChoice = Read-Host "Choice [1-3]"
+    Write-Host "`n  [1] Merge into main   [2] Reject (skip, no changes)   [0] Cancel"
+    $MChoice = Read-Host "Choice [0-2]"
     switch ($MChoice) {
         "1" {
             New-SafetyBackup "pre-merge-$ReviewBranch"
@@ -221,8 +196,8 @@ function Show-TeamModeMenu {
         Write-Host "  [2] Admin Dashboard" -ForegroundColor Green
         Write-Host "      You're the repo owner: pick a teammate's branch (arrow keys), view its diff, merge or reject it." -ForegroundColor Cyan
         Write-Host "  [3] Guidelines" -ForegroundColor Green
-        Write-Host "  [4] Back" -ForegroundColor Green
-        $TChoice = Read-Host "Select choice [1-4]"
+        Write-Host "  [0] Back" -ForegroundColor Green
+        $TChoice = Read-Host "Select choice [0-3]"
         switch ($TChoice) {
             "1" { Invoke-TeamModeStartTask }
             "2" { Invoke-TeamModeAdminDashboard }
@@ -235,7 +210,7 @@ function Show-TeamModeMenu {
                 Write-Host "- This requires you to be added as a Collaborator on the repo."
                 Pause-Console
             }
-            "4" { return }
+            "0" { return }
             default { Write-Host "Invalid selection!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
         }
     }
@@ -292,34 +267,32 @@ function Invoke-OssSyncFork {
 
 function Invoke-OssCreatePR {
     Show-Header
-    Write-Host "Create Pull Request`n" -ForegroundColor Yellow
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        Write-Host "[i] 'gh' (GitHub CLI) is not installed." -ForegroundColor Yellow
-        Write-Host "    Install with: winget install --id GitHub.cli" -ForegroundColor Green
-        Pause-Console
-        return
-    }
-    $PrTitle = Read-Host "PR Title"
-    $PrBody  = Read-Host "PR Body (short description)"
+    if (-not (Get-Command Confirm-VcsReady -ErrorAction SilentlyContinue) -or -not (Confirm-VcsReady)) { Pause-Console; return }
+    $label = if ($Global:VcsProvider -eq "gitlab") { "Merge Request" } else { "Pull Request" }
+    Write-Host "Create $label ($($Global:VcsProvider))`n" -ForegroundColor Yellow
+    $PrTitle = Read-Host "$label Title"
+    $PrBody  = Read-Host "$label Body (short description)"
+    if (-not $PrTitle) { Write-Host "[!] Title required." -ForegroundColor Red; Pause-Console; return }
     if ($Global:DryRun) {
-        Write-Host "[DRY-RUN] Would execute: gh pr create --title `"$PrTitle`" --body `"$PrBody`"" -ForegroundColor Yellow
-        Write-WizardActionLog "DRY-RUN (not executed): gh pr create --title `"$PrTitle`""
+        Write-Host "[DRY-RUN] Would create $label`: $PrTitle" -ForegroundColor Yellow
+        Write-WizardActionLog "DRY-RUN (not executed): create $label `"$PrTitle`""
     } else {
-        gh pr create --title $PrTitle --body $PrBody
-        Write-WizardActionLog "EXECUTED: gh pr create --title `"$PrTitle`""
+        Invoke-SafeRun "Create $label" { Vcs-CreateChangeRequest $PrTitle $PrBody }
+        Write-WizardActionLog "EXECUTED: create $label `"$PrTitle`" ($($Global:VcsProvider))"
     }
     Pause-Console
 }
 
 function Invoke-OssViewPRs {
     Show-Header
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        Write-Host "[i] 'gh' (GitHub CLI) is not installed." -ForegroundColor Yellow
-        Write-Host "    Install with: winget install --id GitHub.cli" -ForegroundColor Green
-        Pause-Console
-        return
+    if (-not (Get-Command Confirm-VcsReady -ErrorAction SilentlyContinue) -or -not (Confirm-VcsReady)) { Pause-Console; return }
+    $label = if ($Global:VcsProvider -eq "gitlab") { "Merge Requests" } else { "Pull Requests" }
+    Write-Host "My Open $label ($($Global:VcsProvider))`n" -ForegroundColor Yellow
+    if ($Global:VcsProvider -eq "gitlab") {
+        Invoke-SafeRun "List $label" { glab mr list --mine }
+    } else {
+        Invoke-SafeRun "List $label" { gh pr list --author "@me" }
     }
-    gh pr list --author "@me"
     Pause-Console
 }
 
@@ -336,8 +309,8 @@ function Show-OssContributorMenu {
         Write-Host "  [4] View My Open PRs" -ForegroundColor Green
         Write-Host "      Lists Pull Requests you've submitted that are still awaiting review." -ForegroundColor Cyan
         Write-Host "  [5] Check gh CLI Installed" -ForegroundColor Green
-        Write-Host "  [6] Back" -ForegroundColor Green
-        $OChoice = Read-Host "Select choice [1-6]"
+        Write-Host "  [0] Back" -ForegroundColor Green
+        $OChoice = Read-Host "Select choice [0-5]"
         switch ($OChoice) {
             "1" { Invoke-OssSetupFork }
             "2" { Invoke-OssSyncFork }
@@ -352,7 +325,7 @@ function Show-OssContributorMenu {
                 }
                 Pause-Console
             }
-            "6" { return }
+            "0" { return }
             default { Write-Host "Invalid selection!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
         }
     }
@@ -429,15 +402,17 @@ function Show-Module5Menu {
             Write-Host "  [3] Open-Source Contributor Mode (switch to Advanced Mode to unlock)" -ForegroundColor DarkGray
             Write-Host "      Fork/upstream/PR workflow for contributing to repos you don't own." -ForegroundColor Cyan
         }
-        Write-Host "  [4] Safe Update Sync (protects local work while pulling)" -ForegroundColor Green
+        Write-Host "  [4] Git Hosting Power Tools (GitHub/GitLab)" -ForegroundColor Green
+        Write-Host "      Issues, PRs/MRs, Releases, Actions/Pipelines, Repo Admin, Delta Diff Suite - not just README-level, full API access." -ForegroundColor Cyan
+        Write-Host "  [5] Safe Update Sync (protects local work while pulling)" -ForegroundColor Green
         Write-Host "      Stashes your uncommitted work, pulls latest, restores your work on top." -ForegroundColor Cyan
-        Write-Host "  [5] Repo History Viewer" -ForegroundColor Green
+        Write-Host "  [6] Repo History Viewer" -ForegroundColor Green
         Write-Host "      Shows commit graph across all branches (uses 'delta' for prettier diffs if installed)." -ForegroundColor Cyan
-        Write-Host "  [6] Toggle Auto-Sync Indicator (currently: $Global:AutoSyncCheck)" -ForegroundColor Green
-        Write-Host "      Shows a live ahead/behind status vs GitHub at the top of every screen." -ForegroundColor Cyan
-        Write-Host "  [7] Back to Main Menu" -ForegroundColor Green
+        Write-Host "  [7] Toggle Auto-Sync Indicator (currently: $Global:AutoSyncCheck)" -ForegroundColor Green
+        Write-Host "      Shows a live ahead/behind status vs GitHub/GitLab at the top of every screen." -ForegroundColor Cyan
+        Write-Host "  [0] Back to Main Menu" -ForegroundColor Green
         Write-Host "`n===================================================================="
-        $M5Choice = Read-Host "Select choice [1-7]"
+        $M5Choice = Read-Host "Select choice [0-7]"
         switch ($M5Choice) {
             "1" { Invoke-LinearWorkflow }
             "2" { Show-TeamModeMenu }
@@ -449,10 +424,22 @@ function Show-Module5Menu {
                     Start-Sleep -Seconds 2
                 }
             }
-            "4" { Invoke-SafeUpdateSync }
-            "5" { Show-RepoHistoryViewer }
-            "6" { Toggle-AutoSync }
-            "7" { return }
+            "4" {
+                if (Get-Command Show-GitHostingPowerToolsMenu -ErrorAction SilentlyContinue) { Show-GitHostingPowerToolsMenu }
+                else { Write-Host "[!] vcs-engine.ps1 not loaded." -ForegroundColor Red; Pause-Console }
+            }
+            "5" { Invoke-SafeUpdateSync }
+            "6" { Show-RepoHistoryViewer }
+            "7" {
+                if (Get-Command Select-AutoSyncInteractive -ErrorAction SilentlyContinue) {
+                    Select-AutoSyncInteractive
+                } else {
+                    $Global:AutoSyncCheck = -not $Global:AutoSyncCheck
+                    Save-WizardConfig
+                    Write-WizardActionLog "Auto-Sync indicator toggled to: $Global:AutoSyncCheck"
+                }
+            }
+            "0" { return }
             default { Write-Host "Invalid selection!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
         }
     }

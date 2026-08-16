@@ -9,13 +9,44 @@
 #               Tool Action History, Live Sync Status Indicator.
 # ==============================================================================
 
-set -e
+# NOTE: 'set -e' was removed. It caused the ENTIRE tool to exit to the shell
+# whenever any external command (gh, glab, docker, etc.) returned non-zero —
+# e.g. a 403 from GitHub, "no script found", or a missing scope. The script
+# already checks return codes manually where it matters (run_git, confirm_*,
+# etc.), so global errexit was doing more harm than good.
+
+# ==============================================================================
+# TERMINAL HYGIENE — alternate screen buffer + guaranteed restoration
+# ------------------------------------------------------------------------------
+# Without this, every menu redraw (plain `clear`) pushes a new frame into the
+# user's terminal SCROLLBACK history instead of a dedicated TUI viewport —
+# scrolling up after a session shows dozens of stacked duplicate menus.
+# Entering the alternate screen buffer (used by vim/htop/less) isolates all
+# of git-wizard's drawing into a temporary view that vanishes on exit,
+# leaving the user's original scrollback untouched.
+#
+# The trap ALSO guarantees the cursor is restored (tput cnorm) even if the
+# user Ctrl+C's out of an arrow-key menu (tput civis) instead of pressing
+# q/Enter — otherwise the terminal cursor stays invisible after exit.
+# ==============================================================================
+_gw_restore_terminal() {
+    printf '\033[?1049l'   # leave alternate screen buffer, return to normal scrollback
+    tput cnorm 2>/dev/null || true   # ensure cursor is visible
+    stty sane 2>/dev/null || true    # reset terminal line discipline defensively
+}
+_gw_handle_interrupt() {
+    _gw_restore_terminal
+    exit 130
+}
+trap _gw_restore_terminal EXIT
+trap _gw_handle_interrupt INT TERM
+printf '\033[?1049h\033[H'   # enter alternate screen buffer, move cursor home
 
 SCRIPT_VERSION="2.1.0"
 
 # --- Paths ---
 TARGET_REPO_DIR="$(pwd)"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 CONFIG_DIR="${HOME}/.git-wizard"
 CONFIG_FILE="${CONFIG_DIR}/config"
 ACTION_LOG="${CONFIG_DIR}/actions.log"
@@ -39,7 +70,7 @@ VCS_PROVIDER=""          # github | gitlab (auto-detected or user-chosen, per-la
 UPDATE_REPO=""           # e.g. "ali4210/git-wizard" - set via Settings
 LAST_UPDATE_CHECK=""     # unix timestamp of last update check
 UPDATE_NOTICE=""         # populated by check_for_updates if a newer version exists
-
+GLOBAL_CLI_ENABLED="false"
 # ==============================================================================
 # CONFIG PERSISTENCE
 # ==============================================================================
@@ -58,9 +89,9 @@ AUTO_SYNC_CHECK="${AUTO_SYNC_CHECK}"
 SYNC_DETAIL_LEVEL="${SYNC_DETAIL_LEVEL}"
 UPDATE_REPO="${UPDATE_REPO}"
 LAST_UPDATE_CHECK="${LAST_UPDATE_CHECK}"
+GLOBAL_CLI_ENABLED="${GLOBAL_CLI_ENABLED}"
 EOF
 }
-
 # ==============================================================================
 # TOOL ACTION LOG (this is git-wizard's own history, NOT git's commit history)
 # ==============================================================================
@@ -128,10 +159,10 @@ confirm_destructive() {
     echo -e "\n${RED}${BOLD}⚠ DESTRUCTIVE ACTION: ${action_desc}${NC}"
     if [[ "$WIZARD_MODE" == "beginner" ]]; then
         echo -e "${YELLOW}Beginner Mode requires typed confirmation.${NC}"
-        read -p "Type EXACTLY 'yes i understand' to proceed: " CONF
+        read -e -p "Type EXACTLY 'yes i understand' to proceed: " CONF
         [[ "$CONF" == "yes i understand" ]]
     else
-        read -p "Proceed? (y/N): " CONF
+        read -e -p "Proceed? (y/N): " CONF
         [[ "$CONF" =~ ^[Yy]$ ]]
     fi
 }
@@ -286,7 +317,7 @@ offer_install() {
         cmd=$(get_install_command "$tool" "$pm")
         echo -e "  ${CYAN}    Detected package manager: ${pm}${NC}"
         echo -e "  ${CYAN}    Option A (repository): ${GREEN}${cmd}${NC}"
-        read -p "      Install '${tool}' from the repository now? (y/N): " DOINSTALL
+        read -e -p "      Install '${tool}' from the repository now? (y/N): " DOINSTALL
         if [[ "$DOINSTALL" =~ ^[Yy]$ ]]; then
             echo -e "  ${CYAN}--> Running: ${cmd}${NC}"
             if eval "$cmd"; then
@@ -306,8 +337,8 @@ offer_install() {
 
     # Fallback path: pull a prebuilt binary directly from the tool's GitHub releases.
     case "$tool" in
-        gh|delta)
-            read -p "      Try pulling a prebuilt binary from GitHub releases instead? (y/N): " DOBINARY
+        gh|delta|glab|git-absorb|ghq)
+            read -e -p "      Try pulling a prebuilt binary from GitHub releases instead? (y/N): " DOBINARY
             if [[ "$DOBINARY" =~ ^[Yy]$ ]]; then
                 install_from_binary "$tool"
             else
@@ -431,6 +462,87 @@ install_from_binary() {
                 echo -e "  ${RED}[!] Download failed. Check your connection or try the repository install instead.${NC}"
             fi
             ;;
+        glab)
+            local arch tag ver url
+            arch=$(detect_binary_arch "gh_style")
+            if [[ -z "$arch" ]]; then
+                echo -e "  ${RED}[!] Unsupported CPU architecture for glab binary pull.${NC}"
+                rm -rf "$tmpdir"; return
+            fi
+            # glab's canonical home moved to gitlab.com/gitlab-org/cli — query GitLab's
+            # own API for the tag, NOT GitHub's stale profclems/glab mirror (mismatched
+            # tags between the two was the previous bug causing 404s).
+            tag=$(curl -fsSL --max-time 10 "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases?per_page=1&order_by=released_at&sort=desc" 2>/dev/null \
+                  | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
+            if [[ -z "$tag" ]]; then
+                echo -e "  ${YELLOW}[i] Could not reach GitLab's API. Falling back to a known-good version: v1.51.0${NC}" >&2
+                tag="v1.51.0"
+            fi
+            ver="${tag#v}"
+            url="https://gitlab.com/gitlab-org/cli/-/releases/${tag}/downloads/glab_${ver}_linux_${arch}.tar.gz"
+            echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
+            if curl -fsSL --max-time 60 "$url" -o "${tmpdir}/glab.tar.gz"; then
+                tar -xzf "${tmpdir}/glab.tar.gz" -C "$tmpdir" 2>/dev/null
+                local binpath
+                binpath=$(find "$tmpdir" -type f -name "glab" | head -1)
+                if [[ -n "$binpath" ]]; then
+                    cp "$binpath" "${install_dir}/glab"
+                    chmod +x "${install_dir}/glab"
+                    echo -e "  ${GREEN}[✔] glab installed to ${install_dir}/glab${NC}"
+                    log_action "Installed glab via binary pull (${tag})"
+                else
+                    echo -e "  ${RED}[!] Downloaded archive but couldn't locate the 'glab' binary inside it.${NC}"
+                fi
+            else
+                echo -e "  ${RED}[!] Download failed for tag ${tag}. Check https://gitlab.com/gitlab-org/cli/-/releases manually for the current asset name.${NC}"
+            fi
+            ;;
+        git-absorb)
+            local target tag url
+            target=$(detect_binary_arch "gnu_target")
+            if [[ -z "$target" ]]; then
+                echo -e "  ${RED}[!] Unsupported CPU architecture for git-absorb binary pull.${NC}"
+                rm -rf "$tmpdir"; return
+            fi
+            tag=$(fetch_latest_release_tag "tummychow/git-absorb" "0.6.11")
+            url="https://github.com/tummychow/git-absorb/releases/download/${tag}/git-absorb-${target}"
+            echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
+            if curl -fsSL --max-time 60 "$url" -o "${install_dir}/git-absorb"; then
+                chmod +x "${install_dir}/git-absorb"
+                echo -e "  ${GREEN}[✔] git-absorb installed to ${install_dir}/git-absorb${NC}"
+                log_action "Installed git-absorb via binary pull (${tag})"
+            else
+                echo -e "  ${RED}[!] Download failed. If tummychow/git-absorb has no matching asset for this release, try: cargo install git-absorb (needs Rust: sudo apt install cargo)${NC}"
+            fi
+            ;;
+        ghq)
+            local arch tag url
+            arch=$(detect_binary_arch "gh_style")
+            if [[ -z "$arch" ]]; then
+                echo -e "  ${RED}[!] Unsupported CPU architecture for ghq binary pull.${NC}"
+                rm -rf "$tmpdir"; return
+            fi
+            tag=$(fetch_latest_release_tag "x-motemen/ghq" "v1.7.1")
+            url="https://github.com/x-motemen/ghq/releases/download/${tag}/ghq_linux_${arch}.zip"
+            echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
+            if command -v unzip &>/dev/null && curl -fsSL --max-time 60 "$url" -o "${tmpdir}/ghq.zip"; then
+                unzip -q "${tmpdir}/ghq.zip" -d "$tmpdir"
+                local binpath
+                binpath=$(find "$tmpdir" -type f -name "ghq" | head -1)
+                if [[ -n "$binpath" ]]; then
+                    cp "$binpath" "${install_dir}/ghq"
+                    chmod +x "${install_dir}/ghq"
+                    echo -e "  ${GREEN}[✔] ghq installed to ${install_dir}/ghq${NC}"
+                    log_action "Installed ghq via binary pull (${tag})"
+                else
+                    echo -e "  ${RED}[!] Downloaded archive but couldn't locate the 'ghq' binary inside it.${NC}"
+                fi
+            elif ! command -v unzip &>/dev/null; then
+                echo -e "  ${RED}[!] 'unzip' is required for this download. Install it with: sudo apt install unzip${NC}"
+            else
+                echo -e "  ${RED}[!] Download failed. Check your connection or try: go install github.com/x-motemen/ghq@latest (needs Go)${NC}"
+            fi
+            ;;
     esac
 
     rm -rf "$tmpdir"
@@ -481,7 +593,7 @@ configure_update_repo() {
     echo -e "${YELLOW}${BOLD}⚙️ SELF-UPDATE SOURCE${NC}\n"
     echo -e "Current: ${CYAN}${UPDATE_REPO:-not set}${NC}\n"
     echo -e "Enter your GitHub repo in the form ${GREEN}username/repo-name${NC} (the one this script lives in)."
-    read -p "Repo (ENTER to leave unchanged): " NEWREPO
+    read -e -p "Repo (ENTER to leave unchanged): " NEWREPO
     if [[ -n "$NEWREPO" ]]; then
         UPDATE_REPO="$NEWREPO"
         save_config
@@ -572,6 +684,132 @@ maybe_auto_check_updates() {
 # Installs the 'pre-commit' framework (if missing), writes a sensible default
 # .pre-commit-config.yaml for THIS repo, and activates the git hook.
 # ==============================================================================
+# ==============================================================================
+# SELF-UPDATE / ROLLBACK — updates git-wizard's OWN installation (SCRIPT_DIR),
+# never touches any of the user's other project repos. Every update tags the
+# current state first, so rollback is always available.
+# ==============================================================================
+update_git_wizard() {
+    show_header
+    echo -e "${YELLOW}${BOLD}⬆️  UPDATE GIT-WIZARD${NC}\n"
+
+    if ! git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        echo -e "${RED}[!] $SCRIPT_DIR isn't a git repository — git-wizard wasn't installed via 'git clone'.${NC}"
+        echo -e "${CYAN}    Re-download the latest version manually from your GitHub/GitLab repo instead.${NC}"
+        pause
+        return
+    fi
+
+    if [[ -z "$UPDATE_REPO" ]]; then
+        echo -e "${YELLOW}[i] No update source configured yet.${NC}"
+        configure_update_repo
+        [[ -z "$UPDATE_REPO" ]] && { pause; return; }
+    fi
+
+    local branch
+    branch=$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+
+    if [[ -n "$(git -C "$SCRIPT_DIR" status --porcelain)" ]]; then
+        echo -e "${RED}[!] You have uncommitted local changes in the git-wizard install directory itself.${NC}"
+        echo -e "${CYAN}    (This is separate from your project repos — it means you edited git-wizard.sh directly.)${NC}"
+        echo -e "${CYAN}    Commit or discard those first, or updating could conflict.${NC}"
+        pause
+        return
+    fi
+
+    local backup_tag="tool-backup-$(date '+%Y%m%d-%H%M%S')"
+    git -C "$SCRIPT_DIR" tag "$backup_tag" HEAD
+    echo -e "${GREEN}[✔] Safety tag created: ${CYAN}${backup_tag}${NC} ${GREEN}(this is how you'll roll back if the update has a bug)${NC}\n"
+    log_action "Tool self-update: created backup tag ${backup_tag}"
+
+    echo -e "${CYAN}--> Fetching latest from ${UPDATE_REPO}...${NC}"
+    if ! git -C "$SCRIPT_DIR" fetch origin "$branch" 2>&1; then
+        echo -e "${RED}[!] Fetch failed. Check your connection. No changes were made (backup tag is harmless if unused).${NC}"
+        pause
+        return
+    fi
+
+    echo -e "${CYAN}--> Pulling latest changes into ${SCRIPT_DIR}...${NC}"
+    if git -C "$SCRIPT_DIR" pull origin "$branch" 2>&1; then
+        echo -e "\n${GREEN}${BOLD}[✔] git-wizard updated successfully.${NC}"
+        echo -e "${CYAN}    Restart git-wizard to use the new version.${NC}"
+        echo -e "${CYAN}    If this update causes a problem, use Settings > Rollback git-wizard — pick '${backup_tag}'.${NC}"
+        log_action "Tool self-update: pulled latest (backup: ${backup_tag})"
+    else
+        echo -e "\n${RED}[!] Pull failed (possibly a conflict). Nothing was lost — roll back with:${NC}"
+        echo -e "${GREEN}    git -C \"${SCRIPT_DIR}\" reset --hard ${backup_tag}${NC}"
+    fi
+    pause
+}
+
+create_tool_checkpoint() {
+    show_header
+    echo -e "${YELLOW}${BOLD}📍 CREATE A GIT-WIZARD CHECKPOINT${NC}\n"
+
+    if ! git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        echo -e "${RED}[!] $SCRIPT_DIR isn't a git repository — checkpoints need it to be a git clone.${NC}"
+        pause
+        return
+    fi
+
+    echo -e "${CYAN}This saves the CURRENT state of git-wizard itself as a rollback point —${NC}"
+    echo -e "${CYAN}useful before you manually edit the script, even if you're not updating right now.${NC}\n"
+
+    local backup_tag="tool-backup-$(date '+%Y%m%d-%H%M%S')"
+    if git -C "$SCRIPT_DIR" tag "$backup_tag" HEAD 2>&1; then
+        echo -e "${GREEN}[✔] Checkpoint created: ${CYAN}${backup_tag}${NC}"
+        echo -e "${CYAN}    Roll back to it anytime via Settings > Rollback git-wizard.${NC}"
+        log_action "Manual tool checkpoint created: ${backup_tag}"
+    else
+        echo -e "${RED}[!] Couldn't create the checkpoint tag.${NC}"
+    fi
+    pause
+}
+
+rollback_git_wizard() {
+    show_header
+    echo -e "${YELLOW}${BOLD}⏪ ROLLBACK GIT-WIZARD TO A PREVIOUS VERSION${NC}\n"
+
+    if ! git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
+        echo -e "${RED}[!] $SCRIPT_DIR isn't a git repository — nothing to roll back.${NC}"
+        pause
+        return
+    fi
+
+    local tag_lines=()
+    while IFS= read -r t; do
+        [[ -n "$t" ]] && tag_lines+=("tag"$'\t'"$t")
+    done < <(git -C "$SCRIPT_DIR" tag -l 'tool-backup-*' --sort=-creatordate)
+
+    if [[ ${#tag_lines[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}[i] No backup tags found yet — rollback points are only created when you run 'Update git-wizard'.${NC}"
+        pause
+        return
+    fi
+
+    if ! select_from_lines_interactive "📌 SELECT A BACKUP TO ROLL BACK TO" "${tag_lines[@]}"; then
+        pause
+        return
+    fi
+    local tag="${SELECTED_LINE#*$'\t'}"
+
+    show_header
+    echo -e "${YELLOW}${BOLD}⏪ ROLLBACK TO: ${tag}${NC}\n"
+    echo -e "${CYAN}This only affects the git-wizard TOOL itself (${SCRIPT_DIR}).${NC}"
+    echo -e "${CYAN}It does NOT touch any of your other project repos or their local files.${NC}\n"
+
+    if confirm_destructive "Roll back git-wizard to ${tag} — any changes made to the tool since then are discarded"; then
+        if git -C "$SCRIPT_DIR" reset --hard "$tag"; then
+            echo -e "\n${GREEN}[✔] Rolled back to ${tag}.${NC}"
+            echo -e "${CYAN}    Restart git-wizard to use this version.${NC}"
+            log_action "Tool rolled back to ${tag}"
+        else
+            echo -e "${RED}[!] Rollback failed.${NC}"
+        fi
+    fi
+    pause
+}
+
 setup_precommit_hooks() {
     show_header
     echo -e "${YELLOW}${BOLD}🪝 PRE-COMMIT HOOKS SETUP${NC}\n"
@@ -589,7 +827,7 @@ setup_precommit_hooks() {
 
         if command -v pipx &>/dev/null; then
             echo -e "  ${CYAN}Detected pipx (best option on Kali/Debian). Install with: ${GREEN}pipx install pre-commit${NC}"
-            read -p "  Install now via pipx? (y/N): " DOPIPX
+            read -e -p "  Install now via pipx? (y/N): " DOPIPX
             if [[ "$DOPIPX" =~ ^[Yy]$ ]]; then
                 if pipx install pre-commit; then
                     echo -e "  ${GREEN}[✔] pre-commit installed via pipx.${NC}"
@@ -606,7 +844,7 @@ setup_precommit_hooks() {
             command -v pip3 &>/dev/null || pipcmd="pip"
             echo -e "  ${CYAN}Fallback: ${GREEN}${pipcmd} install --user --break-system-packages pre-commit${NC}"
             echo -e "  ${YELLOW}(Kali/Debian block plain pip installs system-wide — PEP 668 — this flag opts you into a safe user-level install.)${NC}"
-            read -p "  Install now? (y/N): " DOPIP
+            read -e -p "  Install now? (y/N): " DOPIP
             if [[ "$DOPIP" =~ ^[Yy]$ ]]; then
                 if "$pipcmd" install --user --break-system-packages pre-commit; then
                     echo -e "  ${GREEN}[✔] pre-commit installed.${NC}"
@@ -724,8 +962,42 @@ get_sync_status() {
     if [[ "$fetch_ok" != "true" ]]; then
         line="${line}\n${RED}🚫 Last fetch failed — the numbers above may be stale (check network)${NC}"
     else
-        echo -e "${YELLOW}🔄 ${branch}: ⬆️ ${ahead} ahead  ⬇️ ${behind} behind  (${upstream})${NC}"
+        line="${line}\n${GREEN}🌐 Remote reachable — data is current${NC}"
     fi
+
+    if [[ "$dirty_count" -gt 0 ]]; then
+        line="${line}\n${RED}⚠️  ✏️ ${modified_count} modified   ➕ ${untracked_count} untracked — not yet committed or pushed${NC}"
+    fi
+
+    if [[ "$branch" == "main" || "$branch" == "master" ]] && [[ "$dirty_count" -gt 0 || "$ahead" -gt 0 ]]; then
+        line="${line}\n${RED}⚠️  Uncommitted/unpushed work directly on '${branch}' — consider a feature branch (Module 5)${NC}"
+    fi
+
+    if [[ "$SYNC_DETAIL_LEVEL" == "standard" || "$SYNC_DETAIL_LEVEL" == "full" ]]; then
+        local stash_count
+        stash_count=$(git -C "$TARGET_REPO_DIR" stash list 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$stash_count" -gt 0 ]]; then
+            line="${line}\n${CYAN}📦 ${stash_count} stash(es) saved — don't forget these${NC}"
+        fi
+
+        local last_commit_rel
+        last_commit_rel=$(git -C "$TARGET_REPO_DIR" log -1 --format='%cr' 2>/dev/null || echo "")
+        if [[ -n "$last_commit_rel" ]]; then
+            line="${line}\n${CYAN}🕐 Last commit: ${last_commit_rel}${NC}"
+        fi
+    fi
+
+    if [[ "$SYNC_DETAIL_LEVEL" == "full" && "$behind" -gt 0 ]]; then
+        if git -C "$TARGET_REPO_DIR" merge-tree "$(git -C "$TARGET_REPO_DIR" merge-base "$branch" "$upstream")" "$branch" "$upstream" 2>/dev/null | grep -q "^<<<<<<< "; then
+            line="${line}\n${RED}⚠️  Pulling may CONFLICT — review before Safe Update Sync${NC}"
+        else
+            line="${line}\n${GREEN}✅ Pull will likely be clean (no conflict markers detected)${NC}"
+        fi
+    fi
+
+    line="${line}\n${CYAN}🔧 Detail Level: ${SYNC_DETAIL_LEVEL}  (Settings > option 3 to change)${NC}"
+
+    echo -e "$line"
 }
 
 show_header() {
@@ -738,46 +1010,46 @@ show_header() {
     else
         echo -e "${CYAN}${BOLD}"
         cat << "EOF"
-                                            @@@@@@@@@@@@                                            
-                                      @@@@@@@@@@@@@@@@@@@@@@@@@                                     
-                                 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                                 
-                              @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                              
-                           @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                           
-                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                         
-                       @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                       
-                      @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                      
-                    @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@                    
-                   @@@@@@@@@@@      @@@@@@@@@@@@@@@@@@@@@@@@@@@@      @@@@@@@@@@@                   
-                  @@@@@@@@@@@          @@@@@@          @@@@@@          @@@@@@@@@@@                  
-                 @@@@@@@@@@@@                                          @@@@@@@@@@@@                 
-                @@@@@@@@@@@@@                                          @@@@@@@@@@@@@                
-               @@@@@@@@@@@@@@                                          @@@@@@@@@@@@@@               
-              @@@@@@@@@@@@@@@@                                        @@@@@@@@@@@@@@@@              
-              @@@@@@@@@@@@@@                                            @@@@@@@@@@@@@@              
-              @@@@@@@@@@@@@                                              @@@@@@@@@@@@@              
-             @@@@@@@@@@@@@@                                               @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@             
-             @@@@@@@@@@@@@@                                              @@@@@@@@@@@@@@             
-             @@@@@@@@@@@@@@                                              @@@@@@@@@@@@@@             
-              @@@@@@@@@@@@@@                                            @@@@@@@@@@@@@@              
-              @@@@@@@@@@@@@@@                                          @@@@@@@@@@@@@@@              
-              @@@@@@@@@@@@@@@@@                                      @@@@@@@@@@@@@@@@@              
-               @@@@@@@@@@@@@@@@@@                                  @@@@@@@@@@@@@@@@@@               
-                @@@@@@@   @@@@@@@@@@                            @@@@@@@@@@@@@@@@@@@@                
-                @@@@@@@@     @@@@@@@@@@@@@@              @@@@@@@@@@@@@@@@@@@@@@@@@@@                
-                  @@@@@@@@    @@@@@@@@@@@                  @@@@@@@@@@@@@@@@@@@@@@@                  
-                   @@@@@@@@     @@@@@@@@@                  @@@@@@@@@@@@@@@@@@@@@@                   
-                    @@@@@@@@                               @@@@@@@@@@@@@@@@@@@@@                    
-                     -@@@@@@@                              @@@@@@@@@@@@@@@@@@@-                     
-                       @@@@@@@@                            @@@@@@@@@@@@@@@@@@                       
-                         @@@@@@@@@@@@@@@@                  @@@@@@@@@@@@@@@@                         
-                           @@@@@@@@@@@@@@                  @@@@@@@@@@@@@@                           
-                             %@@@@@@@@@@@                  @@@@@@@@@@@%                             
-                                 @@@@@@@@                  @@@@@@@@                                 
+                                            @@@@@@@@@@@@
+                                      @@@@@@@@@@@@@@@@@@@@@@@@@
+                                 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                              @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                           @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                         @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                       @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                      @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                    @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+                   @@@@@@@@@@@      @@@@@@@@@@@@@@@@@@@@@@@@@@@@      @@@@@@@@@@@
+                  @@@@@@@@@@@          @@@@@@          @@@@@@          @@@@@@@@@@@
+                 @@@@@@@@@@@@                                          @@@@@@@@@@@@
+                @@@@@@@@@@@@@                                          @@@@@@@@@@@@@
+               @@@@@@@@@@@@@@                                          @@@@@@@@@@@@@@
+              @@@@@@@@@@@@@@@@                                        @@@@@@@@@@@@@@@@
+              @@@@@@@@@@@@@@                                            @@@@@@@@@@@@@@
+              @@@@@@@@@@@@@                                              @@@@@@@@@@@@@
+             @@@@@@@@@@@@@@                                               @@@@@@@@@@@@@
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@
+             @@@@@@@@@@@@@                                                @@@@@@@@@@@@@
+             @@@@@@@@@@@@@@                                              @@@@@@@@@@@@@@
+             @@@@@@@@@@@@@@                                              @@@@@@@@@@@@@@
+              @@@@@@@@@@@@@@                                            @@@@@@@@@@@@@@
+              @@@@@@@@@@@@@@@                                          @@@@@@@@@@@@@@@
+              @@@@@@@@@@@@@@@@@                                      @@@@@@@@@@@@@@@@@
+               @@@@@@@@@@@@@@@@@@                                  @@@@@@@@@@@@@@@@@@
+                @@@@@@@   @@@@@@@@@@                            @@@@@@@@@@@@@@@@@@@@
+                @@@@@@@@     @@@@@@@@@@@@@@              @@@@@@@@@@@@@@@@@@@@@@@@@@@
+                  @@@@@@@@    @@@@@@@@@@@                  @@@@@@@@@@@@@@@@@@@@@@@
+                   @@@@@@@@     @@@@@@@@@                  @@@@@@@@@@@@@@@@@@@@@@
+                    @@@@@@@@                               @@@@@@@@@@@@@@@@@@@@@
+                     -@@@@@@@                              @@@@@@@@@@@@@@@@@@@-
+                       @@@@@@@@                            @@@@@@@@@@@@@@@@@@
+                         @@@@@@@@@@@@@@@@                  @@@@@@@@@@@@@@@@
+                           @@@@@@@@@@@@@@                  @@@@@@@@@@@@@@
+                             %@@@@@@@@@@@                  @@@@@@@@@@@%
+                                 @@@@@@@@                  @@@@@@@@
                                      @@@                    @@@
 EOF
         echo -e "${NC}"
@@ -804,7 +1076,7 @@ EOF
 
 pause() {
     echo ""
-    read -p "Press [ENTER] to return to menu..."
+    read -e -p "Press [ENTER] to return to menu..."
 }
 
 show_uptodate_celebration() {
@@ -854,7 +1126,7 @@ mode_selection_wrapper() {
     echo -e "      - Safety backups still run automatically (cheap insurance)\n"
     echo -e "${CYAN}You can change this anytime from the Main Menu.${NC}"
     echo -e "====================================================================\n"
-    read -p "Select mode [1-2]: " MODE_CHOICE
+    read -e -p "Select mode [1-2]: " MODE_CHOICE
     case $MODE_CHOICE in
         1) WIZARD_MODE="beginner"; DRY_RUN="true" ;;
         2) WIZARD_MODE="advanced"; DRY_RUN="false" ;;
@@ -864,22 +1136,34 @@ mode_selection_wrapper() {
     log_action "Mode set to: ${WIZARD_MODE}"
 }
 
-toggle_mode() {
-    if [[ "$WIZARD_MODE" == "beginner" ]]; then
-        WIZARD_MODE="advanced"
-    else
-        WIZARD_MODE="beginner"
+
+
+select_wizard_mode() {
+    local lines=(
+        "beginner"$'\t'"Beginner — simplified menus, typed confirmations on destructive actions"
+        "advanced"$'\t'"Advanced — full menu access, faster confirmations, all workflows visible"
+    )
+    if ! select_from_lines_interactive "📌 SELECT MODE (current: ${WIZARD_MODE})" "${lines[@]}"; then
+        return
     fi
+    WIZARD_MODE="${SELECTED_LINE%%$'\t'*}"
     save_config
     log_action "Mode switched to: ${WIZARD_MODE}"
     echo -e "${GREEN}[✔] Switched to ${WIZARD_MODE} mode.${NC}"
     sleep 1
 }
 
-toggle_dry_run() {
-    if [[ "$DRY_RUN" == "true" ]]; then DRY_RUN="false"; else DRY_RUN="true"; fi
+select_dry_run_state() {
+    local lines=(
+        "false"$'\t'"Off — commands actually run (real git operations)"
+        "true"$'\t'"On — commands are only PRINTED, nothing is actually executed"
+    )
+    if ! select_from_lines_interactive "📌 DRY-RUN MODE (current: ${DRY_RUN})" "${lines[@]}"; then
+        return
+    fi
+    DRY_RUN="${SELECTED_LINE%%$'\t'*}"
     save_config
-    log_action "Dry-Run toggled to: ${DRY_RUN}"
+    log_action "Dry-Run set to: ${DRY_RUN}"
     echo -e "${GREEN}[✔] Dry-Run mode is now: ${DRY_RUN}${NC}"
     sleep 1
 }
@@ -912,7 +1196,69 @@ select_sync_detail_level() {
     fi
     SYNC_DETAIL_LEVEL="${SELECTED_LINE%%$'\t'*}"
     save_config
-    log_action "Auto-Sync indicator toggled to: ${AUTO_SYNC_CHECK}"
+    log_action "Sync Panel Detail Level set to: ${SYNC_DETAIL_LEVEL}"
+    echo -e "${GREEN}[✔] Sync Panel Detail Level is now: ${SYNC_DETAIL_LEVEL}${NC}"
+    sleep 1
+}
+
+github_sync_menu() {
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}🔄 GITHUB SYNC — Panel Settings${NC}\n"
+        echo -e "${CYAN}This controls the live sync status panel shown at the top of every screen.${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} Enable / Disable Sync Panel  ${CYAN}(current: ${AUTO_SYNC_CHECK})${NC}"
+        echo -e "      ${CYAN}Turns the whole panel on or off. If Off, nothing below matters — no panel is shown.${NC}"
+        echo -e "  ${GREEN}[2]${NC} Set Detail Level  ${CYAN}(current: ${SYNC_DETAIL_LEVEL})${NC}"
+        echo -e "      ${CYAN}Minimal / Standard / Full — only visible when the panel is On (option 1).${NC}"
+        echo -e "  ${GREEN}[3]${NC} Preview Panel Now"
+        echo -e "      ${CYAN}Shows exactly what the panel looks like at your current settings, right now.${NC}"
+        echo -e "  ${GREEN}[4]${NC} What's the difference between levels? (Guide)"
+        echo -e "  ${GREEN}[0]${NC} Back to Module 5"
+        echo -e "\n===================================================================="
+        read -e -p "Select choice [0-4]: " GSCHOICE
+        case $GSCHOICE in
+            1) select_auto_sync_state ;;
+            2) select_sync_detail_level ;;
+            3)
+                show_header
+                echo -e "${YELLOW}${BOLD}🔄 LIVE PREVIEW${NC}\n"
+                if [[ "$AUTO_SYNC_CHECK" != "true" ]]; then
+                    echo -e "${RED}[!] Panel is currently OFF (option 1). Nothing would show in the header right now.${NC}"
+                    echo -e "${CYAN}    Turn it On first to see the panel here and on every screen.${NC}"
+                else
+                    local preview
+                    preview=$(get_sync_status)
+                    if [[ -n "$preview" ]]; then
+                        echo -e "$preview"
+                    else
+                        echo -e "${YELLOW}[i] Not inside a Git repository — nothing to preview here.${NC}"
+                    fi
+                fi
+                pause
+                ;;
+            4)
+                show_header
+                echo -e "${YELLOW}${BOLD}📖 SYNC PANEL DETAIL LEVELS EXPLAINED${NC}\n"
+                echo -e "${GREEN}${BOLD}Minimal:${NC}"
+                echo -e "  - Sync tier (✅/🟡/🟠/🔴) with ahead/behind counts"
+                echo -e "  - 🌐/🚫 whether the last fetch actually reached GitHub"
+                echo -e "  - ✏️ modified / ➕ untracked file counts if you're dirty"
+                echo -e "  - Fastest option — one fetch, no extra git calls\n"
+                echo -e "${GREEN}${BOLD}Standard (default):${NC}"
+                echo -e "  - Everything in Minimal, PLUS:"
+                echo -e "  - 📦 stash count, if you have any stashed work sitting around"
+                echo -e "  - 🕐 how long ago your last commit was\n"
+                echo -e "${GREEN}${BOLD}Full:${NC}"
+                echo -e "  - Everything in Standard, PLUS:"
+                echo -e "  - ⚠️/✅ a conflict-risk check when you're behind — runs a dry-run merge"
+                echo -e "    to warn you BEFORE you use Safe Update Sync"
+                echo -e "  - Slightly slower to render since it does extra git work every screen\n"
+                echo -e "${YELLOW}Note:${NC} none of this shows anywhere unless the panel itself is turned On (option 1)."
+                pause
+                ;;
+            0) break ;;
+        esac
+    done
 }
 
 # --- Non-Git Repository Verification & Setup ---
@@ -922,11 +1268,9 @@ check_git_repo() {
         echo -e "${RED}[!] WARNING: '${TARGET_REPO_DIR}' is NOT a Git repository!${NC}\n"
         echo -e "${CYAN}Available Actions:${NC}"
         echo -e "  ${GREEN}[1]${NC} Initialize a new Git Repository here (${BOLD}git init${NC})"
-        echo -e "  ${YELLOW}${BOLD}[2] ⚡ Enable Universal Global CLI${NC}"
-        echo -e "  ${GREEN}[3]${NC} Exit"
+        echo -e "  ${GREEN}[2]${NC} Exit"
         echo -e "\n===================================================================="
-        read -p "Select choice [1-3]: " NON_REPO_CHOICE
-
+        read -e -p "Select choice [1-2]: " NON_REPO_CHOICE
         case $NON_REPO_CHOICE in
             1)
                 run_git init
@@ -934,8 +1278,7 @@ check_git_repo() {
                 echo -e "${GREEN}[✔] Initialized empty Git repository in ${TARGET_REPO_DIR}!${NC}"
                 pause
                 ;;
-            2) enable_global_cli ;;
-            3) exit 0 ;;
+            2) exit 0 ;;
             *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
         esac
     fi
@@ -951,11 +1294,91 @@ enable_global_cli() {
     else
         sudo ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard
     fi
-    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY!${NC}"
-    log_action "Global CLI installed/linked"
+
+    # Persist the "enabled" state so it's never re-offered, and so the tool
+    # re-asserts the symlink on every future launch (see
+    # ensure_global_cli_persisted, called at startup). This is what makes
+    # it survive reboots and new terminals.
+    GLOBAL_CLI_ENABLED="true"
+    save_config
+
+    # Make sure /usr/local/bin is actually on PATH in FUTURE shells too —
+    # append an export line to every shell rc file we can find, once, idempotently.
+    local path_line='export PATH="/usr/local/bin:$PATH"'
+    for rc in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.profile"; do
+        touch "$rc" 2>/dev/null
+        if ! grep -qF "$path_line" "$rc" 2>/dev/null; then
+            {
+                echo ''
+                echo '# Added by git-wizard: ensures git-wizard is found in every new terminal'
+                echo "$path_line"
+            } >> "$rc" 2>/dev/null
+        fi
+    done
+    export PATH="/usr/local/bin:$PATH"
+    hash -r 2>/dev/null || true
+
+    echo -e "\n${CYAN}${BOLD}====================================================================${NC}"
+    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY — PERMANENTLY.${NC}"
+    echo -e "${CYAN}${BOLD}====================================================================${NC}"
+    echo -e "${CYAN}HOW TO USE FROM ANY FOLDER ON THIS MACHINE:${NC}"
+    echo -e "  ${GREEN}1.${NC} Open a NEW terminal window (this one already works too)."
+    echo -e "  ${GREEN}2.${NC} cd into any repo you want to work on."
+    echo -e "  ${GREEN}3.${NC} Simply type: ${GREEN}${BOLD}git-wizard${NC}"
+    echo -e "\n${CYAN}This stays enabled across reboots and new terminals until you${NC}"
+    echo -e "${CYAN}explicitly disable it from Settings > option 12 (Disable Global CLI).${NC}"
+    echo -e "${CYAN}${BOLD}====================================================================${NC}\n"
+
+    log_action "Global CLI enabled permanently (symlink + PATH persisted)"
     pause
 }
 
+disable_global_cli() {
+    show_header
+    echo -e "${YELLOW}${BOLD}⚡ DISABLE UNIVERSAL GLOBAL CLI${NC}\n"
+    if [[ -L "/usr/local/bin/git-wizard" || -f "/usr/local/bin/git-wizard" ]]; then
+        if [[ -w "/usr/local/bin" ]]; then
+            rm -f "/usr/local/bin/git-wizard"
+        else
+            sudo rm -f "/usr/local/bin/git-wizard"
+        fi
+        echo -e "${GREEN}[✔] Removed /usr/local/bin/git-wizard symlink.${NC}"
+    else
+        echo -e "${YELLOW}[i] No symlink found (already removed).${NC}"
+    fi
+
+    local path_line='export PATH="/usr/local/bin:$PATH"'
+    for rc in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.profile"; do
+        if [[ -f "$rc" ]] && grep -qF "$path_line" "$rc" 2>/dev/null; then
+            sed -i "\|# Added by git-wizard: ensures git-wizard is found in every new terminal|d" "$rc" 2>/dev/null
+            sed -i "\|${path_line}|d" "$rc" 2>/dev/null
+            echo -e "${GREEN}[✔] Cleaned up PATH entry from ${rc}${NC}"
+        fi
+    done
+
+    GLOBAL_CLI_ENABLED="false"
+    save_config
+    log_action "Global CLI disabled permanently"
+    echo -e "\n${GREEN}[✔] Global CLI has been permanently disabled.${NC}"
+    echo -e "${CYAN}    You can still run it directly via: ${SCRIPT_DIR}/linux/git-wizard.sh${NC}"
+    pause
+}
+
+# Called once at startup. If previously enabled permanently, silently
+# re-assert the symlink (cheap, idempotent) so it self-heals even if
+# something else removed /usr/local/bin/git-wizard.
+ensure_global_cli_persisted() {
+    [[ "$GLOBAL_CLI_ENABLED" != "true" ]] && return
+    local SCRIPT_PATH="${SCRIPT_DIR}/linux/git-wizard.sh"
+    [[ -f "$SCRIPT_PATH" ]] || return
+    if [[ ! -L "/usr/local/bin/git-wizard" ]]; then
+        if [[ -w "/usr/local/bin" ]]; then
+            ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard 2>/dev/null || true
+        else
+            sudo -n ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard 2>/dev/null || true
+        fi
+    fi
+}
 # ==============================================================================
 # MODULE 1: Identity & SSH Manager  (unchanged logic, routed through run_git where relevant)
 # ==============================================================================
@@ -967,17 +1390,17 @@ manage_identity() {
         echo -e "  ${GREEN}[2]${NC} Generate New SSH Key (ED25519) & Show Public Key"
         echo -e "  ${GREEN}[3]${NC} Test SSH Connection to GitHub"
         echo -e "  ${GREEN}[4]${NC} Inspect & Manage Remote Repository URLs"
-        echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
+        echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
-        read -p "Select choice [1-5]: " ID_CHOICE
+        read -e -p "Select choice [0-4]: " ID_CHOICE
 
         case $ID_CHOICE in
             1)
                 echo -e "\n${CYAN}Current Configuration:${NC}"
                 echo "  Name:  $(git config --global user.name || echo 'Not set')"
                 echo "  Email: $(git config --global user.email || echo 'Not set')"
-                read -p "Enter new global user.name (ENTER to skip): " NEW_NAME
-                read -p "Enter new global user.email (ENTER to skip): " NEW_EMAIL
+                read -e -p "Enter new global user.name (ENTER to skip): " NEW_NAME
+                read -e -p "Enter new global user.email (ENTER to skip): " NEW_EMAIL
                 if [[ -n "$NEW_NAME" ]]; then
                     git config --global user.name "$NEW_NAME"
                     log_action "user.name set to ${NEW_NAME}"
@@ -1007,11 +1430,11 @@ manage_identity() {
                     GIT_PAGER=cat git remote -v 2>/dev/null || echo "No remotes set."
                     echo -e "\n  ${GREEN}[1]${NC} Change / Set New Remote URL"
                     echo -e "  ${GREEN}[2]${NC} Toggle Protocol (HTTPS/SSH)"
-                    echo -e "  ${GREEN}[3]${NC} Back"
-                    read -p "Select choice [1-3]: " REMOTE_CHOICE
+                    echo -e "  ${GREEN}[0]${NC} Back"
+                    read -e -p "Select choice [0-2]: " REMOTE_CHOICE
                     case $REMOTE_CHOICE in
                         1)
-                            read -p "Enter fresh GitHub Remote URL: " RAW_URL
+                            read -e -p "Enter fresh GitHub Remote URL: " RAW_URL
                             NEW_URL=$(clean_remote_url "$RAW_URL")
                             if [[ -n "$NEW_URL" ]]; then
                                 git remote remove origin 2>/dev/null || true
@@ -1029,11 +1452,11 @@ manage_identity() {
                             fi
                             pause
                             ;;
-                        3) break ;;
+                        0) break ;;
                     esac
                 done
                 ;;
-            5) break ;;
+            0) break ;;
         esac
     done
 }
@@ -1046,41 +1469,27 @@ manage_repo() {
         show_header
         echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup, Status & Reset Engine${NC}\n"
         echo -e "  ${GREEN}[1]${NC} 1-Click Complete Repo Setup"
-        echo -e "  ${GREEN}[2]${NC} Quick Push (Add -> Commit -> Push)"
-        echo -e "  ${GREEN}[3]${NC} Inspect Working Directory Status"
-        echo -e "  ${GREEN}[4]${NC} Interactive Git Reset & Undo Utility"
-        echo -e "  ${GREEN}[5]${NC} Smart Conflict Push Resolver"
-        echo -e "  ${GREEN}[6]${NC} Generate Tailored .gitignore File"
-        echo -e "  ${GREEN}[7]${NC} Back to Main Menu"
+        echo -e "  ${RED}[2]${NC} 1-Click Complete Repo Destroy"
+        echo -e "  ${GREEN}[3]${NC} Quick Push (Add -> Commit -> Push)"
+        echo -e "  ${GREEN}[4]${NC} Inspect Working Directory Status"
+        echo -e "  ${GREEN}[5]${NC} Interactive Git Reset & Undo Utility"
+        echo -e "  ${GREEN}[6]${NC} Smart Conflict Push Resolver"
+        echo -e "  ${GREEN}[7]${NC} Generate Tailored .gitignore File"
+        echo -e "  ${GREEN}[8]${NC} Repo History Viewer"
+        echo -e "      ${CYAN}Shows commit graph across all branches (uses 'delta' for prettier diffs if installed).${NC}"
+        echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
-        read -p "Select choice [1-7]: " REPO_CHOICE
+        read -e -p "Select choice [0-8]: " REPO_CHOICE
 
         case $REPO_CHOICE in
-            1)
-                run_git init
-                run_git branch -M main
-                run_git add .
-                if [[ -z "$(git status --porcelain)" ]]; then
-                    echo -e "${YELLOW}[i] Nothing to commit.${NC}"
-                else
-                    read -p "Commit message [default: Initial commit]: " MSG
-                    run_git commit -m "${MSG:-Initial commit}"
-                fi
-                read -p "Enter Remote URL (or ENTER to keep current): " RAW_URL
-                REMOTE_URL=$(clean_remote_url "$RAW_URL")
-                if [[ -n "$REMOTE_URL" ]]; then
-                    git remote remove origin 2>/dev/null || true
-                    run_git remote add origin "$REMOTE_URL"
-                fi
-                run_git push -u origin main || echo -e "${YELLOW}[!] Push rejected. Use Option [5] to resolve.${NC}"
-                pause
-                ;;
-            2)
+            1) one_click_repo_setup ;;
+            2) one_click_repo_destroy ;;
+            3)
                 run_git add .
                 if [[ -z "$(git status --porcelain)" ]]; then
                     show_uptodate_celebration
                 else
-                    read -p "Enter commit message: " MSG
+                    read -e -p "Enter commit message: " MSG
                     if [[ -z "$MSG" ]]; then
                         echo -e "${RED}Message required!${NC}"
                         pause
@@ -1088,17 +1497,17 @@ manage_repo() {
                     fi
                     run_git commit -m "$MSG"
                     BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-                    run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [5].${NC}"
+                    run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [6].${NC}"
                 fi
                 pause
                 ;;
-            3)
+            4)
                 show_header
                 STATUS_OUT=$(git status --porcelain)
                 [[ -z "$STATUS_OUT" ]] && show_uptodate_celebration || GIT_PAGER=cat git status
                 pause
                 ;;
-            4)
+            5)
                 while true; do
                     show_header
                     echo -e "${YELLOW}${BOLD}📌 INTERACTIVE GIT RESET & UNDO UTILITY${NC}\n"
@@ -1108,8 +1517,8 @@ manage_repo() {
                     echo -e "  ${RED}[4]${NC} Hard Rollback Last Commit ${RED}(DESTROYS work!)${NC}"
                     echo -e "  ${RED}${BOLD}[5]${NC} ${RED}${BOLD}Force Sync with Origin${NC} ${RED}(Nuclear reset — matches GitHub exactly, DESTROYS local divergence!)${NC}"
                     echo -e "      ${CYAN}Use this when your local branch is badly tangled/diverged and you just want it to match origin/main exactly.${NC}"
-                    echo -e "  ${GREEN}[6]${NC} Back"
-                    read -p "Select choice [1-6]: " RESET_CHOICE
+                    echo -e "  ${GREEN}[0]${NC} Back"
+                    read -e -p "Select choice [0-5]: " RESET_CHOICE
                     case $RESET_CHOICE in
                         1) run_git reset HEAD; pause ;;
                         2)
@@ -1129,18 +1538,19 @@ manage_repo() {
                             pause
                             ;;
                         5) force_sync_with_origin ;;
-                        6) break ;;
+                        0) break ;;
                     esac
                 done
                 ;;
-            5)
+            6)
                 show_header
                 BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
                 echo -e "  ${GREEN}[1]${NC} Safe Pull & Rebase"
                 echo -e "  ${GREEN}[2]${NC} Safe Pull & Merge"
                 echo -e "  ${RED}[3]${NC} Force Push ${RED}(Overwrites remote!)${NC}"
-                echo -e "  ${GREEN}[4]${NC} Cancel"
-                read -p "Select strategy [1-4]: " STRAT
+                echo -e "  ${RED}[4]${NC} Force Pull ${RED}(Overwrites local!)${NC}"
+                echo -e "  ${GREEN}[5]${NC} Cancel"
+                read -e -p "Select strategy [1-5]: " STRAT
                 case $STRAT in
                     1)
                         if run_git pull origin "$BRANCH" --rebase; then
@@ -1162,13 +1572,25 @@ manage_repo() {
                             run_git push origin "$BRANCH" --force
                         fi
                         ;;
+                    4)
+                        if confirm_destructive "Force pull — overwrites local branch '${BRANCH}' with origin/${BRANCH}"; then
+                            create_safety_backup "pre-force-pull"
+                            if run_git fetch origin; then
+                                run_git reset --hard "origin/${BRANCH}"
+                                run_git clean -fd
+                                echo -e "${GREEN}[✔] Local branch now matches origin/${BRANCH}.${NC}"
+                            else
+                                echo -e "${RED}[!] Fetch failed. Aborting — nothing was reset.${NC}"
+                            fi
+                        fi
+                        ;;
                     *) echo "Cancelled." ;;
                 esac
                 pause
                 ;;
-            6)
+            7)
                 echo -e "  [1] Python  [2] Node.js  [3] Go/Linux"
-                read -p "Choice [1-3]: " GI_CHOICE
+                read -e -p "Choice [1-3]: " GI_CHOICE
                 case $GI_CHOICE in
                     1) printf '__pycache__/\n*.py[cod]\nvenv/\n.env\n.pytest_cache/\n' > .gitignore ;;
                     2) printf 'node_modules/\nbuild/\ndist/\n.env\n.env.local\nnpm-debug.log*\n' > .gitignore ;;
@@ -1178,9 +1600,199 @@ manage_repo() {
                 log_action ".gitignore generated"
                 pause
                 ;;
-            7) break ;;
+            8) repo_history_viewer ;;
+            0) break ;;
         esac
     done
+}
+
+one_click_repo_setup() {
+    show_header
+    echo -e "${YELLOW}${BOLD}🚀 1-CLICK COMPLETE REPO SETUP${NC}\n"
+
+    local folder_name
+    folder_name="$(basename "$TARGET_REPO_DIR")"
+    echo -e "${CYAN}Folder detected: ${BOLD}${folder_name}${NC}"
+    echo -e "${CYAN}This repo will be created on your Git host using this exact name,${NC}"
+    echo -e "${CYAN}so the push always matches — no manual remote-URL headaches.${NC}\n"
+
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        run_git init
+        run_git branch -M main 2>/dev/null || true
+    fi
+
+    if ! ensure_vcs_ready; then
+        echo -e "${YELLOW}[i] Couldn't set up ${VCS_PROVIDER:-a Git host} CLI. Falling back to manual remote-URL entry.${NC}"
+        run_git add .
+        if [[ -n "$(git status --porcelain)" ]]; then
+            read -e -p "Commit message [default: Initial commit]: " MSG
+            run_git commit -m "${MSG:-Initial commit}"
+        fi
+        read -e -p "Enter Remote URL (or ENTER to keep current): " RAW_URL
+        REMOTE_URL=$(clean_remote_url "$RAW_URL")
+        if [[ -n "$REMOTE_URL" ]]; then
+            git remote remove origin 2>/dev/null || true
+            run_git remote add origin "$REMOTE_URL"
+        fi
+        run_git push -u origin main || echo -e "${YELLOW}[!] Push rejected. Use Option [5] to resolve.${NC}"
+        pause
+        return
+    fi
+
+    read -e -p "Repo name [ENTER to use folder name '${folder_name}']: " CUSTOM_NAME
+    local repo_name="${CUSTOM_NAME:-$folder_name}"
+    echo -e "  [1] Public  [2] Private"
+    read -e -p "Visibility [1-2, default 1]: " VIS_CHOICE
+    local vis="public"
+    [[ "$VIS_CHOICE" == "2" ]] && vis="private"
+
+    echo -e "\n${CYAN}--> Creating '${repo_name}' (${vis}) on ${VCS_PROVIDER^}...${NC}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY-RUN] Would create ${VCS_PROVIDER} repo: ${repo_name} (${vis})${NC}"
+    else
+        if ! vcs_create_repo "$repo_name" "$vis"; then
+            echo -e "${RED}[!] Repo creation failed (name may already exist, or a permissions issue).${NC}"
+            echo -e "${YELLOW}[i] If it already exists, that's fine — continuing to link/push to it.${NC}"
+        fi
+        log_action "Created ${VCS_PROVIDER} repo: ${repo_name} (${vis}) via 1-click setup"
+    fi
+
+    run_git add .
+    if [[ -z "$(git status --porcelain)" ]]; then
+        echo -e "${YELLOW}[i] Nothing to commit.${NC}"
+    else
+        read -e -p "Commit message [default: Initial commit]: " MSG
+        run_git commit -m "${MSG:-Initial commit}"
+    fi
+
+    local uname full_name urlpair ssh_url https_url chosen_url
+    uname=$(vcs_my_username)
+    if [[ -n "$uname" ]]; then
+        full_name="${uname}/${repo_name}"
+        urlpair=$(vcs_get_repo_url "$full_name")
+        ssh_url="${urlpair%%|*}"
+        https_url="${urlpair##*|}"
+        if [[ -n "$ssh_url" ]]; then
+            echo -e "\n${CYAN}Which URL protocol would you like to push with?${NC}"
+            echo -e "  [1] SSH   ${CYAN}(git@${VCS_PROVIDER}.com:...)${NC}"
+            echo -e "  [2] HTTPS ${CYAN}(https://${VCS_PROVIDER}.com/...)${NC}"
+            read -e -p "Choice [1-2, default 1]: " PROTO_CHOICE
+            if [[ "$PROTO_CHOICE" == "2" ]]; then
+                chosen_url="$https_url"
+            else
+                chosen_url="$ssh_url"
+            fi
+            git remote remove origin 2>/dev/null || true
+            run_git remote add origin "$chosen_url"
+        fi
+    fi
+
+    if ! git remote get-url origin &>/dev/null; then
+        echo -e "${YELLOW}[i] Couldn't auto-detect the new repo's URL.${NC}"
+        read -e -p "Paste the Remote URL manually: " RAW_URL
+        REMOTE_URL=$(clean_remote_url "$RAW_URL")
+        if [[ -n "$REMOTE_URL" ]]; then
+            git remote remove origin 2>/dev/null || true
+            run_git remote add origin "$REMOTE_URL"
+        fi
+    fi
+
+    run_git branch -M main 2>/dev/null || true
+    if run_git push -u origin main; then
+        echo -e "\n${GREEN}${BOLD}[✔] 1-Click Repo Setup complete!${NC}"
+        local final_url
+        final_url=$(git remote get-url origin 2>/dev/null || echo "")
+        [[ -n "$final_url" ]] && echo -e "${GREEN}${BOLD}Remote URL to share:${NC} ${CYAN}${final_url}${NC}"
+    else
+        echo -e "${YELLOW}[!] Push rejected. Use Module 2 > Option [5] Smart Conflict Push Resolver.${NC}"
+    fi
+    pause
+}
+
+# Extracts "owner/repo" from an origin URL, GitHub or GitLab, SSH or HTTPS.
+parse_owner_repo_from_url() {
+    local url="$1"
+    if [[ "$url" =~ ^git@[^:]+:([^/]+)/(.+)$ ]]; then
+        echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
+    elif [[ "$url" =~ ^https?://[^/]+/([^/]+)/(.+)$ ]]; then
+        echo "${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
+    else
+        echo ""
+    fi
+}
+
+one_click_repo_destroy() {
+    show_header
+    echo -e "${RED}${BOLD}💣 1-CLICK COMPLETE REPO DESTROY${NC}\n"
+
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        echo -e "${RED}[!] '${TARGET_REPO_DIR}' is not a Git repository — nothing to detect here.${NC}"
+        pause
+        return
+    fi
+    if ! git remote get-url origin &>/dev/null; then
+        echo -e "${RED}[!] No 'origin' remote set on this folder — can't tell which remote repo to destroy.${NC}"
+        pause
+        return
+    fi
+
+    local origin_url full_name
+    origin_url=$(git remote get-url origin)
+    detect_vcs_provider
+    if [[ -z "$VCS_PROVIDER" ]]; then
+        echo -e "${YELLOW}[i] Couldn't auto-detect GitHub vs GitLab from: ${origin_url}${NC}"
+        if ! ensure_vcs_provider; then pause; return; fi
+    fi
+
+    full_name=$(parse_owner_repo_from_url "$origin_url")
+    if [[ -z "$full_name" ]]; then
+        echo -e "${RED}[!] Couldn't parse an owner/repo out of: ${origin_url}${NC}"
+        pause
+        return
+    fi
+
+    echo -e "${CYAN}Detected remote repo: ${BOLD}${full_name}${NC} ${CYAN}(${VCS_PROVIDER^})${NC}"
+    echo -e "${CYAN}Local folder: ${TARGET_REPO_DIR}${NC}\n"
+
+    if ! ensure_vcs_ready; then
+        pause
+        return
+    fi
+
+    if ! confirm_destructive "PERMANENTLY DELETE '${full_name}' from ${VCS_PROVIDER^} — this cannot be undone"; then
+        echo -e "${YELLOW}[i] Cancelled — nothing was destroyed.${NC}"
+        pause
+        return
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY-RUN] Would delete remote repo: ${full_name}${NC}"
+    else
+        local del_out del_code
+        del_out=$(vcs_delete_repo "$full_name" 2>&1)
+        del_code=$?
+        if [[ $del_code -ne 0 ]]; then
+            echo -e "${RED}${BOLD}⚠️  Delete failed:${NC}\n${YELLOW}${del_out}${NC}"
+            if echo "$del_out" | grep -qi "delete_repo\|scope\|403\|permission"; then
+                if [[ "$VCS_PROVIDER" == "github" ]]; then
+                    echo -e "${CYAN}Fix: ${GREEN}gh auth refresh -h github.com -s delete_repo${NC}"
+                else
+                    echo -e "${CYAN}Fix: ${GREEN}glab auth login --scopes api,delete_repo${NC}"
+                fi
+            fi
+            pause
+            return
+        fi
+        echo -e "${GREEN}[✔] Deleted '${full_name}' from ${VCS_PROVIDER^}.${NC}"
+        log_action "DESTROYED remote repo: ${full_name} (${VCS_PROVIDER}) via 1-click destroy"
+    fi
+
+    read -e -p "Also remove the local 'origin' remote link here (keeps your local files/history)? (y/N): " RMORIGIN
+    if [[ "$RMORIGIN" =~ ^[Yy]$ ]]; then
+        git remote remove origin 2>/dev/null || true
+        echo -e "${GREEN}[✔] Local 'origin' remote removed.${NC}"
+    fi
+    pause
 }
 
 # ==============================================================================
@@ -1291,12 +1903,12 @@ manage_branches() {
         echo -e "  ${GREEN}[2]${NC} Create New Branch & Publish"
         echo -e "  ${GREEN}[3]${NC} Switch Branch"
         echo -e "  ${GREEN}[4]${NC} Delete Branch ${RED}(Local & Remote)${NC}"
-        echo -e "  ${GREEN}[5]${NC} Back to Main Menu"
-        read -p "Select choice [1-5]: " B_CHOICE
+        echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
+        read -e -p "Select choice [0-4]: " B_CHOICE
         case $B_CHOICE in
             1) show_header; GIT_PAGER=cat git branch -vv; echo; GIT_PAGER=cat git branch -r; pause ;;
             2)
-                read -p "Enter new branch name: " NEW_B
+                read -e -p "Enter new branch name: " NEW_B
                 if [[ -n "$NEW_B" ]]; then
                     run_git checkout -b "$NEW_B"
                     run_git push -u origin "$NEW_B" || echo -e "${YELLOW}[!] Branch created locally but push failed. Check your remote/connection.${NC}"
@@ -1322,7 +1934,7 @@ manage_branches() {
                 fi
                 pause
                 ;;
-            5) break ;;
+            0) break ;;
         esac
     done
 }
@@ -1334,15 +1946,15 @@ commit_assistant() {
     show_header
     echo -e "${YELLOW}${BOLD}[+] Module 4: Conventional Commit Crafting Assistant${NC}\n"
     echo -e "  [1] feat:  [2] fix:  [3] docs:  [4] refactor:  [5] chore:"
-    read -p "Select choice [1-5]: " C_TYPE
+    read -e -p "Select choice [1-5]: " C_TYPE
     local PREFIX=""
     case $C_TYPE in
         1) PREFIX="feat" ;; 2) PREFIX="fix" ;; 3) PREFIX="docs" ;;
         4) PREFIX="refactor" ;; 5) PREFIX="chore" ;;
         *) echo "Cancelled."; return ;;
     esac
-    read -p "Enter short scope (optional): " SCOPE
-    read -p "Enter clear commit description: " DESC
+    read -e -p "Enter short scope (optional): " SCOPE
+    read -e -p "Enter clear commit description: " DESC
     if [[ -z "$DESC" ]]; then
         echo -e "${RED}Description required!${NC}"
         pause
@@ -1355,7 +1967,7 @@ commit_assistant() {
         FINAL_MSG="${PREFIX}: ${DESC}"
     fi
     echo -e "\n${CYAN}Crafted Commit Message:${NC} ${BOLD}$FINAL_MSG${NC}"
-    read -p "Execute commit now? (y/N): " DO_COMMIT
+    read -e -p "Execute commit now? (y/N): " DO_COMMIT
     if [[ "$DO_COMMIT" =~ ^[Yy]$ ]]; then
         run_git add .
         run_git commit -m "$FINAL_MSG"
@@ -1385,7 +1997,7 @@ linear_workflow() {
     fi
     run_git add .
     if [[ -n "$(git status --porcelain)" ]]; then
-        read -p "Enter commit message: " MSG
+        read -e -p "Enter commit message: " MSG
         if [[ -n "$MSG" ]]; then
             run_git commit -m "$MSG"
         fi
@@ -1400,10 +2012,10 @@ team_mode_start_task() {
     show_header
     echo -e "${YELLOW}${BOLD}👥 TEAM MODE — Start My Task${NC}\n"
     echo -e "  [1] feature  [2] fix  [3] hotfix"
-    read -p "Select branch type [1-3]: " TTYPE
+    read -e -p "Select branch type [1-3]: " TTYPE
     local PREFIX=""
     case $TTYPE in 1) PREFIX="feature" ;; 2) PREFIX="fix" ;; 3) PREFIX="hotfix" ;; *) echo "Cancelled."; pause; return ;; esac
-    read -p "Short name for your task (e.g. login-bug): " TNAME
+    read -e -p "Short name for your task (e.g. login-bug): " TNAME
     if [[ -z "$TNAME" ]]; then
         echo -e "${RED}Name required.${NC}"
         pause
@@ -1419,7 +2031,7 @@ team_mode_start_task() {
     if [[ -z "$(git status --porcelain)" ]]; then
         echo -e "${YELLOW}[i] No changes to commit yet — branch created and published empty.${NC}"
     else
-        read -p "Enter commit message describing your ${PREFIX}: " CMSG
+        read -e -p "Enter commit message describing your ${PREFIX}: " CMSG
         if [[ -z "$CMSG" ]]; then
             CMSG="${PREFIX}: ${TNAME}"
         fi
@@ -1447,7 +2059,7 @@ team_mode_admin_dashboard() {
     echo -e "${CYAN}--- Diff vs main for origin/${REVIEW_BRANCH} ---${NC}\n"
     GIT_PAGER=cat git diff "main...origin/${REVIEW_BRANCH}" || true
     echo -e "\n  [1] Merge into main   [2] Reject (skip, no changes)   [3] Cancel"
-    read -p "Choice [1-3]: " MCHOICE
+    read -e -p "Choice [1-3]: " MCHOICE
     case $MCHOICE in
         1)
             create_safety_backup "pre-merge-${REVIEW_BRANCH}"
@@ -1472,8 +2084,8 @@ team_mode() {
         echo -e "      ${CYAN}You're the repo owner: pick a teammate's branch (arrow keys), view its diff, merge or reject it.${NC}"
         echo -e "  ${GREEN}[3]${NC} Guidelines"
         echo -e "      ${CYAN}Quick rules for how Team Mode is meant to be used.${NC}"
-        echo -e "  ${GREEN}[4]${NC} Back"
-        read -p "Select choice [1-4]: " TCHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-3]: " TCHOICE
         case $TCHOICE in
             1) team_mode_start_task ;;
             2) team_mode_admin_dashboard ;;
@@ -1486,7 +2098,7 @@ team_mode() {
                 echo -e "- This requires you to be added as a Collaborator on the repo."
                 pause
                 ;;
-            4) break ;;
+            0) break ;;
         esac
     done
 }
@@ -1499,7 +2111,7 @@ oss_setup_fork() {
         echo -e "${GREEN}[✔] 'upstream' remote already configured: $(git remote get-url upstream)${NC}"
     else
         echo -e "${CYAN}No 'upstream' remote found.${NC}"
-        read -p "Enter the ORIGINAL repo URL you forked from: " UP_URL
+        read -e -p "Enter the ORIGINAL repo URL you forked from: " UP_URL
         UP_URL=$(clean_remote_url "$UP_URL")
         if [[ -n "$UP_URL" ]]; then
             run_git remote add upstream "$UP_URL"
@@ -1528,37 +2140,61 @@ oss_sync_fork() {
 
 oss_create_pr() {
     show_header
-    echo -e "${YELLOW}${BOLD}📬 Create Pull Request${NC}\n"
-    if ! command -v gh &>/dev/null; then
-        suggest_install "gh"
+    local label="Pull Request"
+    if ! ensure_vcs_ready; then pause; return; fi
+    [[ "$VCS_PROVIDER" == "gitlab" ]] && label="Merge Request"
+    echo -e "${YELLOW}${BOLD}📬 Create ${label} (${VCS_PROVIDER^})${NC}\n"
+    read -e -p "${label} Title: " PR_TITLE
+    read -e -p "${label} Body (short description): " PR_BODY
+    if [[ -z "$PR_TITLE" ]]; then
+        echo -e "${RED}Title required.${NC}"
         pause
         return
     fi
-    read -p "PR Title: " PR_TITLE
-    read -p "PR Body (short description): " PR_BODY
     if [[ "$DRY_RUN" == "true" ]]; then
-        echo -e "${YELLOW}[DRY-RUN] Would execute:${NC} gh pr create --title \"$PR_TITLE\" --body \"$PR_BODY\""
-        log_action "DRY-RUN (not executed): gh pr create --title \"$PR_TITLE\""
+        echo -e "${YELLOW}[DRY-RUN] Would create ${label}: ${PR_TITLE}${NC}"
+        log_action "DRY-RUN (not executed): create ${label} \"$PR_TITLE\""
     else
-        gh pr create --title "$PR_TITLE" --body "$PR_BODY"
-        log_action "EXECUTED: gh pr create --title \"$PR_TITLE\""
+        safe_run "Create ${label}" vcs_create_change_request "$PR_TITLE" "$PR_BODY"
+        log_action "EXECUTED: create ${label} \"$PR_TITLE\" (${VCS_PROVIDER})"
     fi
     pause
 }
 
 oss_view_prs() {
     show_header
-    if ! command -v gh &>/dev/null; then
-        suggest_install "gh"
-        pause
-        return
-    fi
-    gh pr list --author "@me" || echo -e "${YELLOW}[i] No PRs found or not authenticated (run: gh auth login).${NC}"
+    if ! ensure_vcs_ready; then pause; return; fi
+    local label="Pull Requests"
+    [[ "$VCS_PROVIDER" == "gitlab" ]] && label="Merge Requests"
+    echo -e "${YELLOW}${BOLD}📬 My Open ${label} (${VCS_PROVIDER^})${NC}\n"
+    case "$VCS_PROVIDER" in
+        github) safe_run "List ${label}" gh pr list --author "@me" ;;
+        gitlab) safe_run "List ${label}" glab mr list --mine ;;
+    esac
     pause
 }
 
 # ==============================================================================
-# PROVIDER ABSTRACTION LAYER (GitHub via 'gh' / GitLab via 'glab')
+# SAFE COMMAND RUNNER — captures output/exit code, shows failures as an
+# in-tool warning (not a raw crash-to-terminal). Use for any gh/glab/docker
+# call that might legitimately fail (permissions, missing scope, 404, etc.)
+# ==============================================================================
+safe_run() {
+    local desc="$1"; shift
+    local out
+    out=$("$@" 2>&1)
+    local code=$?
+    if [[ $code -ne 0 ]]; then
+        echo -e "${RED}${BOLD}⚠️  ${desc} — failed (exit code ${code})${NC}"
+        echo -e "${YELLOW}$(echo "$out" | head -10)${NC}"
+        echo -e "${CYAN}This is shown as a warning — git-wizard is still running normally.${NC}"
+    else
+        echo -e "${GREEN}[✔] ${desc} — done.${NC}"
+        [[ -n "$out" ]] && echo "$out"
+    fi
+}
+
+
 # One dispatcher per action — menus call vcs_* functions, never gh/glab directly.
 # ==============================================================================
 detect_vcs_provider() {
@@ -1584,7 +2220,7 @@ ensure_vcs_provider() {
     echo -e "  ${GREEN}[1]${NC} GitHub"
     echo -e "  ${GREEN}[2]${NC} GitLab"
     echo -e "  ${GREEN}[3]${NC} Cancel"
-    read -p "Select choice [1-3]: " VCS_CHOICE
+    read -e -p "Select choice [1-3]: " VCS_CHOICE
     case $VCS_CHOICE in
         1) VCS_PROVIDER="github" ;;
         2) VCS_PROVIDER="gitlab" ;;
@@ -1630,7 +2266,7 @@ ensure_vcs_ready() {
 
     if [[ "$auth_ok" != "true" ]]; then
         echo -e "${YELLOW}[i] Not logged in to ${VCS_PROVIDER^} yet.${NC}"
-        read -p "Run '${bin} auth login' now? (y/N): " DOLOGIN
+        read -e -p "Run '${bin} auth login' now? (y/N): " DOLOGIN
         if [[ "$DOLOGIN" =~ ^[Yy]$ ]]; then
             "$bin" auth login
         else
@@ -1780,11 +2416,51 @@ vcs_create_snippet() {
         gitlab) glab snippet create "$file" ;;
     esac
 }
+vcs_list_repos() {
+    case "$VCS_PROVIDER" in
+        github) gh repo list --limit 100 ;;
+        gitlab) glab repo list --per-page 100 ;;
+    esac
+}
 vcs_create_repo() {
     local name="$1" visibility="$2"
     case "$VCS_PROVIDER" in
         github) gh repo create "$name" "--${visibility}" ;;
         gitlab) glab repo create "$name" "--${visibility}" ;;
+    esac
+}
+vcs_get_repo_url() {
+    # Returns "ssh_url|https_url" for a given repo (owner/repo or namespace/project)
+    local repo="$1"
+    case "$VCS_PROVIDER" in
+        github) gh api "repos/${repo}" --jq '(.ssh_url) + "|" + (.clone_url)' 2>/dev/null ;;
+        gitlab) glab api "projects/$(url_encode "$repo")" --jq '(.ssh_url_to_repo) + "|" + (.http_url_to_repo)' 2>/dev/null ;;
+    esac
+}
+vcs_my_username() {
+    case "$VCS_PROVIDER" in
+        github) gh api user --jq '.login' 2>/dev/null ;;
+        gitlab) glab api user --jq '.username' 2>/dev/null ;;
+    esac
+}
+vcs_add_collaborator() {
+    # $1=repo (owner/repo)  $2=username  $3=permission level
+    local repo="$1" username="$2" permission="$3"
+    case "$VCS_PROVIDER" in
+        github)
+            # permission: pull, triage, push, maintain, admin
+            gh api "repos/${repo}/collaborators/${username}" -X PUT -f "permission=${permission}"
+            ;;
+        gitlab)
+            # access_level: 10=Guest 20=Reporter 30=Developer 40=Maintainer 50=Owner
+            local uid
+            uid=$(glab api "users?username=${username}" --jq '.[0].id' 2>/dev/null)
+            if [[ -z "$uid" ]]; then
+                echo -e "${RED}[!] Couldn't find a GitLab user named '${username}'.${NC}"
+                return 1
+            fi
+            glab api "projects/$(url_encode "$repo")/members" -X POST -f "user_id=${uid}" -f "access_level=${permission}"
+            ;;
     esac
 }
 vcs_rename_repo() {
@@ -1815,57 +2491,161 @@ vcs_version() {
 }
 
 # ==============================================================================
-# GITHUB CLI HUB (Module 5 top-level) — list repos, browse full file/folder
-# structure (not just README), view PRs, manage auth. All via 'gh api',
-# no extra dependency beyond gh itself.
+# GIT CLI HUB (Module 5 top-level) — list repos, browse full file/folder
+# structure (not just README), manage auth. Provider-routed (GitHub via 'gh',
+# GitLab via 'glab') through the ensure_vcs_ready dispatcher defined above.
 # ==============================================================================
-ensure_gh_ready() {
-    # Returns 0 if gh is installed AND authenticated, else guides the user and returns 1.
-    if ! command -v gh &>/dev/null; then
-        echo -e "${YELLOW}[i] This needs 'gh' (GitHub CLI) — it's what actually talks to your GitHub account.${NC}"
-        offer_install "gh"
-        if ! command -v gh &>/dev/null; then
-            return 1
-        fi
-        echo ""
-    fi
 
-    if ! gh auth status &>/dev/null; then
-        echo -e "${YELLOW}[i] Not logged in yet. Your git config (name/email) is just commit metadata —${NC}"
-        echo -e "${YELLOW}    it doesn't authenticate you to GitHub's API. A real login is needed.${NC}"
-        read -p "Run 'gh auth login' now? (y/N): " DOLOGIN
-        if [[ "$DOLOGIN" =~ ^[Yy]$ ]]; then
-            gh auth login
-        else
-            echo -e "${YELLOW}[i] Skipped.${NC}"
-            return 1
-        fi
-    fi
-
-    if ! gh auth status &>/dev/null; then
-        echo -e "${RED}[!] Still not authenticated. Try 'gh auth login' again.${NC}"
-        return 1
-    fi
-    return 0
+url_encode() {
+    local string="$1" strlen encoded c i hex
+    strlen=${#string}
+    for (( i=0; i<strlen; i++ )); do
+        c="${string:i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) encoded+="$c" ;;
+            *) printf -v hex '%%%02X' "'$c"
+               encoded+="$hex" ;;
+        esac
+    done
+    echo "$encoded"
 }
 
-github_list_my_repos() {
+vcs_repo_list_full() {
+    # One "owner/repo" (or "namespace/project") per line
+    case "$VCS_PROVIDER" in
+        github) gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null ;;
+        gitlab) glab api "projects?membership=true&per_page=100" --jq '.[].path_with_namespace' 2>/dev/null ;;
+    esac
+}
+
+vcs_default_branch() {
+    local repo="$1"
+    case "$VCS_PROVIDER" in
+        github) gh api "repos/${repo}" --jq '.default_branch' 2>/dev/null ;;
+        gitlab) glab api "projects/$(url_encode "$repo")" --jq '.default_branch' 2>/dev/null ;;
+    esac
+}
+
+vcs_list_dir() {
+    # Emits "dir\tname" or "file\tname" lines for the given repo/path
+    local repo="$1" path="$2"
+    case "$VCS_PROVIDER" in
+        github)
+            local api_path="repos/${repo}/contents"
+            [[ -n "$path" ]] && api_path="${api_path}/${path}"
+            gh api "$api_path" --jq '.[] | .type + "\t" + .name' 2>/dev/null
+            ;;
+        gitlab)
+            local qpath=""
+            [[ -n "$path" ]] && qpath="&path=$(url_encode "$path")"
+            glab api "projects/$(url_encode "$repo")/repository/tree?per_page=100${qpath}" --jq '.[] | .type + "\t" + .name' 2>/dev/null \
+                | sed 's/^tree\t/dir\t/; s/^blob\t/file\t/'
+            ;;
+    esac
+}
+
+vcs_file_raw() {
+    local repo="$1" path="$2" branch="$3"
+    case "$VCS_PROVIDER" in
+        github)
+            gh api "repos/${repo}/contents/${path}" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null
+            ;;
+        gitlab)
+            glab api "projects/$(url_encode "$repo")/repository/files/$(url_encode "$path")/raw?ref=${branch}" 2>/dev/null
+            ;;
+    esac
+}
+
+
+print_repo_table() {
+    printf "${CYAN}${BOLD}%-45s %-10s %-20s${NC}\n" "REPOSITORY" "VISIBILITY" "LAST UPDATED"
+    printf "${CYAN}%s${NC}\n" "--------------------------------------------------------------------------"
+    local name vis upd
+    while IFS=$'\t' read -r name vis upd; do
+        [[ -z "$name" ]] && continue
+        local vcolor="$GREEN"
+        [[ "$vis" == "private" ]] && vcolor="$YELLOW"
+        printf "${BOLD}%-45s${NC} ${vcolor}%-10s${NC} ${CYAN}%-20s${NC}\n" "$name" "$vis" "$upd"
+    done
+}
+
+vcs_repo_list_rich() {
+    case "$VCS_PROVIDER" in
+        github)
+            gh repo list --limit 1000 --json nameWithOwner,visibility,updatedAt \
+                --jq '.[] | [.nameWithOwner, (.visibility|ascii_downcase), .updatedAt] | @tsv' 2>/dev/null
+            ;;
+        gitlab)
+            local page=1 out
+            while :; do
+                out=$(glab api "projects?membership=true&per_page=100&page=${page}" \
+                    --jq '.[] | [.path_with_namespace, .visibility, .last_activity_at] | @tsv' 2>/dev/null)
+                [[ -z "$out" ]] && break
+                echo "$out"
+                (( $(echo "$out" | wc -l) < 100 )) && break
+                ((page++))
+            done
+            ;;
+    esac
+}
+
+
+# Reads TSV lines from stdin: name\tvisibility\tstars\tupdated\tisfork
+render_repo_table() {
+    local name vis stars updated isfork
+    local max_name=4
+    local rows=()
+    while IFS=$'\t' read -r name vis stars updated isfork; do
+        [[ -z "$name" ]] && continue
+        rows+=("${name}"$'\t'"${vis}"$'\t'"${stars}"$'\t'"${updated}"$'\t'"${isfork}")
+        (( ${#name} > max_name )) && max_name=${#name}
+    done
+    if [[ ${#rows[@]} -eq 0 ]]; then
+        echo -e "${YELLOW}[i] No repositories returned.${NC}"
+        return
+    fi
+    echo -e "${GREEN}${BOLD}Total repositories found: ${#rows[@]}${NC}\n"
+    printf "  ${BOLD}%-${max_name}s  %-10s  %-8s  %-20s${NC}\n" "NAME" "VISIBILITY" "STARS" "LAST UPDATED"
+    printf "  %s\n" "$(printf -- '-%.0s' $(seq 1 $((max_name + 46))))"
+    for row in "${rows[@]}"; do
+        IFS=$'\t' read -r name vis stars updated isfork <<< "$row"
+        local vis_color="$GREEN"
+        [[ "$vis" == "private" ]] && vis_color="$RED"
+        local fork_tag=""
+        [[ "$isfork" == "true" ]] && fork_tag="${CYAN} [fork]${NC}"
+        local short_date="${updated%%T*}"
+        printf "  ${CYAN}%-${max_name}s${NC}  ${vis_color}%-10s${NC}  ${YELLOW}%-8s${NC}  %-20s%s\n" \
+            "$name" "$vis" "★${stars:-0}" "$short_date" "$fork_tag"
+    done
+}
+
+vcs_list_my_repos() {
     show_header
-    echo -e "${YELLOW}${BOLD}📂 YOUR GITHUB REPOSITORIES${NC}\n"
-    if ! ensure_gh_ready; then pause; return; fi
+    echo -e "${YELLOW}${BOLD}📂 YOUR ${VCS_PROVIDER^^} REPOSITORIES${NC}\n"
+    if ! ensure_vcs_ready; then pause; return; fi
 
-    echo -e "${CYAN}--> Fetching your repositories from GitHub...${NC}\n"
-    local repo_count
-    repo_count=$(gh repo list --limit 200 --json name 2>/dev/null | grep -c '"name"')
-    echo -e "${GREEN}${BOLD}Total repositories found: ${repo_count}${NC}\n"
-    gh repo list --limit 200 --source \
-        --json name,visibility,updatedAt,isFork \
-        --template '{{range .}}{{tablerow (printf "%s" .name) .visibility (timeago .updatedAt) (printf "%v" .isFork)}}{{end}}' \
-        2>/dev/null || gh repo list --limit 200
-
-    log_action "Listed GitHub repos via gh CLI (count: ${repo_count})"
+    echo -e "${CYAN}--> Fetching your repositories from ${VCS_PROVIDER^}...${NC}\n"
+    case "$VCS_PROVIDER" in
+        github)
+            # No --source flag here on purpose — --source silently drops
+            # forks. We include everything and tag forks in the table
+            # instead of hiding them.
+            gh repo list --limit 200 \
+                --json name,visibility,updatedAt,isFork,stargazerCount \
+                --jq '.[] | [.name, (.visibility | ascii_downcase), (.stargazerCount|tostring), .updatedAt, (.isFork|tostring)] | @tsv' 2>/dev/null \
+                | render_repo_table
+            log_action "Listed GitHub repos via gh CLI"
+            ;;
+        gitlab)
+            glab api "projects?membership=true&per_page=100&order_by=last_activity_at" \
+                --jq '.[] | [.path_with_namespace, .visibility, (.star_count|tostring), .last_activity_at, (.forked_from_project != null | tostring)] | @tsv' 2>/dev/null \
+                | render_repo_table
+            log_action "Listed GitLab projects via glab CLI"
+            ;;
+    esac
     pause
 }
+
 
 # Arrow-key selector over a dynamic list of "TYPE\tNAME" lines (used for repo browsing)
 select_from_lines_interactive() {
@@ -1915,16 +2695,16 @@ select_from_lines_interactive() {
     done
 }
 
-github_browse_repo_files() {
+vcs_browse_repo_files() {
     show_header
-    echo -e "${YELLOW}${BOLD}🗂️  BROWSE REPOSITORY FILES & FOLDERS${NC}\n"
-    if ! ensure_gh_ready; then pause; return; fi
+    echo -e "${YELLOW}${BOLD}🗂️  BROWSE REPOSITORY FILES & FOLDERS (${VCS_PROVIDER^})${NC}\n"
+    if ! ensure_vcs_ready; then pause; return; fi
 
     echo -e "${CYAN}--> Fetching your repositories...${NC}"
     local repo_lines=()
     while IFS= read -r r; do
         [[ -n "$r" ]] && repo_lines+=("repo"$'\t'"$r")
-    done < <(gh repo list --limit 200 --json nameWithOwner --jq '.[].nameWithOwner' 2>/dev/null)
+    done < <(vcs_repo_list_full)
 
     if [[ ${#repo_lines[@]} -eq 0 ]]; then
         echo -e "${RED}[!] No repositories found (or couldn't fetch the list).${NC}"
@@ -1937,17 +2717,15 @@ github_browse_repo_files() {
         return
     fi
     local repo_full="${SELECTED_LINE#*$'\t'}"
+    local branch
+    branch=$(vcs_default_branch "$repo_full")
 
     local current_path=""
     while true; do
-        local api_path="repos/${repo_full}/contents"
-        [[ -n "$current_path" ]] && api_path="${api_path}/${current_path}"
-
         local raw_entries
-        raw_entries=$(gh api "$api_path" --jq '.[] | .type + "\t" + .name' 2>/dev/null)
+        raw_entries=$(vcs_list_dir "$repo_full" "$current_path")
         if [[ -z "$raw_entries" ]]; then
-            # Might be a file at this path (shouldn't happen via our own navigation), or an empty/broken dir
-            echo -e "${RED}[!] Could not list contents at '${current_path:-/}' (empty, or a 'gh api' error).${NC}"
+            echo -e "${RED}[!] Could not list contents at '${current_path:-/}' (empty, or an API error — check auth/permissions).${NC}"
             pause
             break
         fi
@@ -1985,10 +2763,10 @@ github_browse_repo_files() {
                 echo -e "${YELLOW}${BOLD}📄 ${sel_name}${NC} ${CYAN}(${repo_full}:${current_path:+$current_path/}${sel_name})${NC}\n"
                 local file_path="${current_path:+$current_path/}${sel_name}"
                 if command -v bat &>/dev/null; then
-                    gh api "repos/${repo_full}/contents/${file_path}" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | bat --paging=always --style=numbers -l "${sel_name##*.}"
+                    vcs_file_raw "$repo_full" "$file_path" "$branch" | bat --paging=always --style=numbers -l "${sel_name##*.}"
                 else
-                    gh api "repos/${repo_full}/contents/${file_path}" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null | GIT_PAGER=cat less -R 2>/dev/null || \
-                    gh api "repos/${repo_full}/contents/${file_path}" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null
+                    vcs_file_raw "$repo_full" "$file_path" "$branch" | GIT_PAGER=cat less -R 2>/dev/null || \
+                    vcs_file_raw "$repo_full" "$file_path" "$branch"
                 fi
                 pause
                 ;;
@@ -1996,37 +2774,57 @@ github_browse_repo_files() {
     done
 }
 
-github_cli_hub_menu() {
+vcs_cli_hub_menu() {
+    if ! ensure_vcs_provider; then return; fi
     while true; do
         show_header
-        echo -e "${YELLOW}${BOLD}🐙 GitHub CLI Hub${NC}\n"
+        echo -e "${YELLOW}${BOLD}🐙 Git CLI Hub — ${VCS_PROVIDER^^}${NC}\n"
         echo -e "  ${GREEN}[1]${NC} List My Repositories"
         echo -e "      ${CYAN}Every repo on your account, with visibility and last-updated info.${NC}"
         echo -e "  ${GREEN}[2]${NC} Browse Repository Files & Folders"
         echo -e "      ${CYAN}Full file/folder tree for any of your repos — not just the README.${NC}"
-        echo -e "  ${GREEN}[3]${NC} Check / Setup gh Authentication"
-        echo -e "  ${GREEN}[4]${NC} Back"
-        read -p "Select choice [1-4]: " GHCHOICE
+        echo -e "  ${GREEN}[3]${NC} Repo History Viewer"
+        echo -e "      ${CYAN}Shows commit graph across all branches (uses 'delta' for prettier diffs if installed).${NC}"
+        echo -e "  ${GREEN}[4]${NC} Check / Setup Authentication"
+        echo -e "  ${GREEN}[5]${NC} Switch Provider (currently: ${VCS_PROVIDER^})"
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-5]: " GHCHOICE
         case $GHCHOICE in
-            1) github_list_my_repos ;;
-            2) github_browse_repo_files ;;
-            3)
+            1) vcs_list_my_repos ;;
+            2) vcs_browse_repo_files ;;
+            3) repo_history_viewer ;;
+            4)
                 show_header
-                if command -v gh &>/dev/null; then
-                    if gh auth status &>/dev/null; then
-                        echo -e "${GREEN}[✔] gh is installed and authenticated.${NC}"
-                        gh auth status
+                local bin
+                bin=$(vcs_binary_name)
+                if vcs_cli_installed; then
+                    local auth_ok="false"
+                    case "$VCS_PROVIDER" in
+                        github) gh auth status &>/dev/null && auth_ok="true" ;;
+                        gitlab) glab auth status &>/dev/null && auth_ok="true" ;;
+                    esac
+                    if [[ "$auth_ok" == "true" ]]; then
+                        echo -e "${GREEN}[✔] ${bin} is installed and authenticated.${NC}"
+                        "$bin" auth status
                     else
-                        echo -e "${YELLOW}[i] gh is installed but not logged in.${NC}"
-                        read -p "Run 'gh auth login' now? (y/N): " DL
-                        [[ "$DL" =~ ^[Yy]$ ]] && gh auth login
+                        echo -e "${YELLOW}[i] ${bin} is installed but not logged in.${NC}"
+                        read -e -p "Run '${bin} auth login' now? (y/N): " DL
+                        [[ "$DL" =~ ^[Yy]$ ]] && "$bin" auth login
                     fi
                 else
-                    suggest_install "gh"
+                    suggest_install "$bin"
                 fi
                 pause
                 ;;
-            4) return ;;
+            5)
+                echo -e "  [1] GitHub  [2] GitLab"
+                read -e -p "Choice [1-2]: " SW
+                case $SW in
+                    1) VCS_PROVIDER="github" ;;
+                    2) VCS_PROVIDER="gitlab" ;;
+                esac
+                ;;
+            0) return ;;
         esac
     done
 }
@@ -2043,14 +2841,14 @@ oss_contributor_mode() {
         echo -e "      ${CYAN}Opens a Pull Request asking the original repo's owner to merge your branch.${NC}"
         echo -e "  ${GREEN}[4]${NC} View My Open PRs"
         echo -e "      ${CYAN}Lists Pull Requests you've submitted that are still awaiting review.${NC}"
-        echo -e "  ${GREEN}[5]${NC} Back"
-        read -p "Select choice [1-5]: " OCHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-4]: " OCHOICE
         case $OCHOICE in
             1) oss_setup_fork ;;
             2) oss_sync_fork ;;
             3) oss_create_pr ;;
             4) oss_view_prs ;;
-            5) break ;;
+            0) break ;;
         esac
     done
 }
@@ -2091,7 +2889,7 @@ safe_update_sync() {
 }
 
 # ==============================================================================
-# DELTA DIFF SUITE — provider-agnostic, pure git + delta. Module 7.
+# DELTA DIFF SUITE — provider-agnostic, pure git + delta. Main Menu > option 6.
 # ==============================================================================
 delta_view() {
     # Pipes a diff through delta if available, else falls back to a plain pager.
@@ -2146,8 +2944,8 @@ delta_compare_branches() {
 delta_compare_commits() {
     show_header
     echo -e "${YELLOW}${BOLD}🔀 COMPARE TWO COMMITS${NC}\n"
-    read -p "Enter FIRST commit hash: " C1
-    read -p "Enter SECOND commit hash: " C2
+    read -e -p "Enter FIRST commit hash: " C1
+    read -e -p "Enter SECOND commit hash: " C2
     if [[ -z "$C1" || -z "$C2" ]]; then
         echo -e "${RED}Both commit hashes required.${NC}"
         pause
@@ -2161,7 +2959,7 @@ delta_view_single_commit() {
     echo -e "${YELLOW}${BOLD}📖 VIEW A SINGLE COMMIT'S DIFF${NC}\n"
     GIT_PAGER=cat git -C "$TARGET_REPO_DIR" log --oneline -15
     echo ""
-    read -p "Enter commit hash to view: " CH
+    read -e -p "Enter commit hash to view: " CH
     if [[ -z "$CH" ]]; then
         pause
         return
@@ -2184,8 +2982,8 @@ delta_display_settings() {
     echo -e "  ${GREEN}[1]${NC} Toggle Side-by-Side View"
     echo -e "  ${GREEN}[2]${NC} Toggle Line Numbers"
     echo -e "  ${GREEN}[3]${NC} Set Syntax Theme"
-    echo -e "  ${GREEN}[4]${NC} Back"
-    read -p "Select choice [1-4]: " DCHOICE
+    echo -e "  ${GREEN}[0]${NC} Back"
+    read -e -p "Select choice [0-3]: " DCHOICE
     case $DCHOICE in
         1)
             local cur
@@ -2210,14 +3008,29 @@ delta_display_settings() {
             log_action "delta.line-numbers toggled"
             ;;
         3)
-            read -p "Enter a delta/bat syntax theme name (e.g. 'Dracula', 'Monokai Extended'): " THEME
+            local theme_list=()
+            if delta --list-syntax-themes &>/dev/null; then
+                while IFS= read -r th; do
+                    [[ -n "$th" && "$th" != *":"* ]] && theme_list+=("$th"$'\t'"$th")
+                done < <(delta --list-syntax-themes 2>/dev/null)
+            fi
+            if [[ ${#theme_list[@]} -eq 0 ]]; then
+                echo -e "${YELLOW}[i] Couldn't list themes from delta — falling back to manual entry.${NC}"
+                read -e -p "Enter a delta/bat syntax theme name (e.g. 'Dracula', 'Monokai Extended'): " THEME
+            else
+                if select_from_lines_interactive "📌 SELECT SYNTAX THEME" "${theme_list[@]}"; then
+                    THEME="${SELECTED_LINE%%$'\t'*}"
+                else
+                    THEME=""
+                fi
+            fi
             if [[ -n "$THEME" ]]; then
                 git config --global delta.syntax-theme "$THEME"
                 echo -e "${GREEN}[✔] Theme set to: ${THEME}${NC}"
                 log_action "delta.syntax-theme set to ${THEME}"
             fi
             ;;
-        4) return ;;
+        0) return ;;
     esac
     pause
 }
@@ -2233,8 +3046,8 @@ delta_diff_suite_menu() {
         echo -e "  ${GREEN}[4]${NC} Compare Two Commits"
         echo -e "  ${GREEN}[5]${NC} View a Single Commit's Diff"
         echo -e "  ${GREEN}[6]${NC} Delta Display Settings"
-        echo -e "  ${GREEN}[7]${NC} Back"
-        read -p "Select choice [1-7]: " DDCHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-6]: " DDCHOICE
         case $DDCHOICE in
             1) delta_view_uncommitted ;;
             2) delta_view_staged ;;
@@ -2242,13 +3055,13 @@ delta_diff_suite_menu() {
             4) delta_compare_commits ;;
             5) delta_view_single_commit ;;
             6) delta_display_settings ;;
-            7) break ;;
+            0) break ;;
         esac
     done
 }
 
 # ==============================================================================
-# GH/GLAB COMMAND CENTER — Module 7. Provider-routed via vcs_* dispatchers.
+# GH/GLAB COMMAND CENTER — Main Menu > option 6. Provider-routed via vcs_* dispatchers.
 # ==============================================================================
 cc_issues_menu() {
     while true; do
@@ -2259,14 +3072,14 @@ cc_issues_menu() {
         echo -e "  ${GREEN}[3]${NC} Create Issue"
         echo -e "  ${GREEN}[4]${NC} Comment on Issue"
         echo -e "  ${GREEN}[5]${NC} Close Issue"
-        echo -e "  ${GREEN}[6]${NC} Back"
-        read -p "Select choice [1-6]: " ICHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-5]: " ICHOICE
         case $ICHOICE in
             1) show_header; vcs_list_issues; pause ;;
-            2) read -p "Issue number: " N; [[ -n "$N" ]] && { show_header; vcs_view_issue "$N"; }; pause ;;
+            2) read -e -p "Issue number: " N; [[ -n "$N" ]] && { show_header; vcs_view_issue "$N"; }; pause ;;
             3)
-                read -p "Title: " T
-                read -p "Body: " B
+                read -e -p "Title: " T
+                read -e -p "Body: " B
                 if [[ -n "$T" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}[DRY-RUN] Would create issue: ${T}${NC}"
@@ -2278,8 +3091,8 @@ cc_issues_menu() {
                 pause
                 ;;
             4)
-                read -p "Issue number: " N
-                read -p "Comment: " C
+                read -e -p "Issue number: " N
+                read -e -p "Comment: " C
                 if [[ -n "$N" && -n "$C" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}[DRY-RUN] Would comment on issue #${N}${NC}"
@@ -2291,14 +3104,14 @@ cc_issues_menu() {
                 pause
                 ;;
             5)
-                read -p "Issue number to close: " N
+                read -e -p "Issue number to close: " N
                 if [[ -n "$N" ]] && confirm_destructive "Close issue #${N}"; then
                     vcs_close_issue "$N"
                     log_action "Closed issue #${N}"
                 fi
                 pause
                 ;;
-            6) break ;;
+            0) break ;;
         esac
     done
 }
@@ -2314,14 +3127,14 @@ cc_change_requests_menu() {
         echo -e "  ${GREEN}[3]${NC} View Diff"
         echo -e "  ${GREEN}[4]${NC} Merge"
         echo -e "  ${GREEN}[5]${NC} Create from Current Branch"
-        echo -e "  ${GREEN}[6]${NC} Back"
-        read -p "Select choice [1-6]: " PCHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-5]: " PCHOICE
         case $PCHOICE in
             1) show_header; vcs_list_change_requests; pause ;;
-            2) read -p "${label%s} number: " N; [[ -n "$N" ]] && vcs_checkout_change_request "$N"; pause ;;
-            3) read -p "${label%s} number: " N; [[ -n "$N" ]] && { show_header; vcs_diff_change_request "$N" | delta_view; }; pause ;;
+            2) read -e -p "${label%s} number: " N; [[ -n "$N" ]] && vcs_checkout_change_request "$N"; pause ;;
+            3) read -e -p "${label%s} number: " N; [[ -n "$N" ]] && { show_header; vcs_diff_change_request "$N" | delta_view; }; pause ;;
             4)
-                read -p "${label%s} number to merge: " N
+                read -e -p "${label%s} number to merge: " N
                 if [[ -n "$N" ]] && confirm_destructive "Merge ${label%s} #${N}"; then
                     vcs_merge_change_request "$N"
                     log_action "Merged ${label%s} #${N}"
@@ -2329,8 +3142,8 @@ cc_change_requests_menu() {
                 pause
                 ;;
             5)
-                read -p "Title: " T
-                read -p "Description: " B
+                read -e -p "Title: " T
+                read -e -p "Description: " B
                 if [[ -n "$T" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}[DRY-RUN] Would create ${label%s}: ${T}${NC}"
@@ -2341,7 +3154,7 @@ cc_change_requests_menu() {
                 fi
                 pause
                 ;;
-            6) break ;;
+            0) break ;;
         esac
     done
 }
@@ -2354,14 +3167,14 @@ cc_releases_menu() {
         echo -e "  ${GREEN}[2]${NC} View Latest Release"
         echo -e "  ${GREEN}[3]${NC} Create Release"
         echo -e "  ${GREEN}[4]${NC} Delete Release"
-        echo -e "  ${GREEN}[5]${NC} Back"
-        read -p "Select choice [1-5]: " RCHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-4]: " RCHOICE
         case $RCHOICE in
             1) show_header; vcs_list_releases; pause ;;
             2) show_header; vcs_view_latest_release; pause ;;
             3)
-                read -p "Tag (e.g. v1.0.0): " TAG
-                read -p "Title: " TITLE
+                read -e -p "Tag (e.g. v1.0.0): " TAG
+                read -e -p "Title: " TITLE
                 if [[ -n "$TAG" ]]; then
                     if [[ "$DRY_RUN" == "true" ]]; then
                         echo -e "${YELLOW}[DRY-RUN] Would create release ${TAG}${NC}"
@@ -2373,14 +3186,14 @@ cc_releases_menu() {
                 pause
                 ;;
             4)
-                read -p "Tag to delete: " TAG
+                read -e -p "Tag to delete: " TAG
                 if [[ -n "$TAG" ]] && confirm_destructive "Delete release ${TAG}"; then
                     vcs_delete_release "$TAG"
                     log_action "Deleted release ${TAG}"
                 fi
                 pause
                 ;;
-            5) break ;;
+            0) break ;;
         esac
     done
 }
@@ -2395,14 +3208,14 @@ cc_runs_menu() {
         echo -e "  ${GREEN}[2]${NC} Watch a Live Run"
         echo -e "  ${GREEN}[3]${NC} Trigger a Run Manually"
         echo -e "  ${GREEN}[4]${NC} View Run Logs"
-        echo -e "  ${GREEN}[5]${NC} Back"
-        read -p "Select choice [1-5]: " RUCHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-4]: " RUCHOICE
         case $RUCHOICE in
-            1) show_header; vcs_list_runs; pause ;;
-            2) show_header; vcs_watch_run ;;
-            3) show_header; vcs_trigger_run; pause ;;
-            4) read -p "Run/Job ID: " N; [[ -n "$N" ]] && { show_header; vcs_view_run_logs "$N"; }; pause ;;
-            5) break ;;
+            1) show_header; safe_run "List runs" vcs_list_runs; pause ;;
+            2) show_header; safe_run "Watch live run" vcs_watch_run; pause ;;
+            3) show_header; safe_run "Trigger run" vcs_trigger_run; pause ;;
+            4) read -e -p "Run/Job ID: " N; [[ -n "$N" ]] && { show_header; safe_run "View run logs" vcs_view_run_logs "$N"; }; pause ;;
+            0) break ;;
         esac
     done
 }
@@ -2415,12 +3228,12 @@ cc_snippets_menu() {
         echo -e "${YELLOW}${BOLD}📋 ${label^^} (${VCS_PROVIDER^})${NC}\n"
         echo -e "  ${GREEN}[1]${NC} List ${label}"
         echo -e "  ${GREEN}[2]${NC} Create from a File"
-        echo -e "  ${GREEN}[3]${NC} Back"
-        read -p "Select choice [1-3]: " GCHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-2]: " GCHOICE
         case $GCHOICE in
             1) show_header; vcs_list_snippets; pause ;;
             2)
-                read -p "Path to file: " F
+                read -e -p "Path to file: " F
                 if [[ -f "$F" ]]; then
                     vcs_create_snippet "$F"
                     log_action "Created ${label%s} from ${F}"
@@ -2429,7 +3242,7 @@ cc_snippets_menu() {
                 fi
                 pause
                 ;;
-            3) break ;;
+            0) break ;;
         esac
     done
 }
@@ -2446,14 +3259,14 @@ cc_codespaces_menu() {
     echo -e "  ${GREEN}[2]${NC} Create Codespace"
     echo -e "  ${GREEN}[3]${NC} Open (SSH into) a Codespace"
     echo -e "  ${GREEN}[4]${NC} Stop a Codespace"
-    echo -e "  ${GREEN}[5]${NC} Back"
-    read -p "Select choice [1-5]: " CSCHOICE
+    echo -e "  ${GREEN}[0]${NC} Back"
+    read -e -p "Select choice [0-4]: " CSCHOICE
     case $CSCHOICE in
-        1) gh codespace list ;;
-        2) gh codespace create ;;
-        3) read -p "Codespace name: " N; [[ -n "$N" ]] && gh codespace ssh -c "$N" ;;
-        4) read -p "Codespace name: " N; [[ -n "$N" ]] && gh codespace stop -c "$N" ;;
-        5) return ;;
+        1) safe_run "List codespaces" gh codespace list ;;
+        2) safe_run "Create codespace" gh codespace create ;;
+        3) read -e -p "Codespace name: " N; [[ -n "$N" ]] && safe_run "SSH into codespace" gh codespace ssh -c "$N" ;;
+        4) read -e -p "Codespace name: " N; [[ -n "$N" ]] && safe_run "Stop codespace" gh codespace stop -c "$N" ;;
+        0) return ;;
     esac
     pause
 }
@@ -2462,41 +3275,143 @@ cc_repo_admin_menu() {
     while true; do
         show_header
         echo -e "${YELLOW}${BOLD}🛠️  REPO / PROJECT ADMIN (${VCS_PROVIDER^})${NC}\n"
-        echo -e "  ${GREEN}[1]${NC} Create New Repo"
-        echo -e "  ${GREEN}[2]${NC} Rename Current Repo"
-        echo -e "  ${RED}[3]${NC} Delete a Repo ${RED}(PERMANENT!)${NC}"
-        echo -e "  ${GREEN}[4]${NC} Back"
-        read -p "Select choice [1-4]: " ACHOICE
+        echo -e "  ${GREEN}[1]${NC} List My Repos"
+        echo -e "  ${GREEN}[2]${NC} Create New Repo"
+        echo -e "  ${GREEN}[3]${NC} Get Remote URL for a Repo"
+        echo -e "  ${GREEN}[4]${NC} Add a Collaborator / Team Member"
+        echo -e "  ${GREEN}[5]${NC} Rename Current Repo"
+        echo -e "  ${RED}[6]${NC} Delete a Repo ${RED}(PERMANENT!)${NC}"
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-6]: " ACHOICE
         case $ACHOICE in
-            1)
-                read -p "New repo name: " N
+            1) vcs_list_my_repos ;;
+            2)
+                read -e -p "New repo name: " N
                 echo -e "  [1] Public  [2] Private"
-                read -p "Visibility [1-2]: " V
+                read -e -p "Visibility [1-2]: " V
                 local vis="public"
                 [[ "$V" == "2" ]] && vis="private"
                 if [[ -n "$N" ]]; then
                     vcs_create_repo "$N" "$vis"
                     log_action "Created ${VCS_PROVIDER} repo: ${N} (${vis})"
+
+                    # Fetch and show the remote URL immediately — this is what
+                    # you actually need to push anything to the new repo.
+                    local uname full_name urlpair ssh_url https_url
+                    uname=$(vcs_my_username)
+                    if [[ -n "$uname" ]]; then
+                        full_name="${uname}/${N}"
+                        echo -e "\n${CYAN}--> Fetching remote URL for ${full_name}...${NC}"
+                        urlpair=$(vcs_get_repo_url "$full_name")
+                        ssh_url="${urlpair%%|*}"
+                        https_url="${urlpair##*|}"
+                        if [[ -n "$ssh_url" ]]; then
+                            echo -e "${GREEN}${BOLD}Repo created!${NC}"
+                            echo -e "  SSH:   ${CYAN}${ssh_url}${NC}"
+                            echo -e "  HTTPS: ${CYAN}${https_url}${NC}"
+                            read -e -p "Set this as 'origin' for the current directory (${TARGET_REPO_DIR})? (y/N): " DOORIGIN
+                            if [[ "$DOORIGIN" =~ ^[Yy]$ ]]; then
+                                echo -e "  [1] Use SSH  [2] Use HTTPS"
+                                read -e -p "  Choice [1-2]: " PROTO
+                                local chosen_url="$ssh_url"
+                                [[ "$PROTO" == "2" ]] && chosen_url="$https_url"
+                                git remote remove origin 2>/dev/null || true
+                                run_git remote add origin "$chosen_url"
+                                echo -e "${GREEN}[✔] 'origin' set to ${chosen_url}${NC}"
+                            fi
+                        else
+                            echo -e "${YELLOW}[i] Repo created, but couldn't auto-fetch its URL — check ${VCS_PROVIDER}'s website directly.${NC}"
+                        fi
+                    fi
                 fi
                 pause
                 ;;
-            2)
-                read -p "New name for THIS repo: " N
+            3)
+                read -e -p "Full repo name (owner/repo or namespace/project): " N
+                if [[ -n "$N" ]]; then
+                    show_header
+                    local urlpair ssh_url https_url
+                    urlpair=$(vcs_get_repo_url "$N")
+                    ssh_url="${urlpair%%|*}"
+                    https_url="${urlpair##*|}"
+                    if [[ -n "$ssh_url" ]]; then
+                        echo -e "${GREEN}${BOLD}${N}${NC}"
+                        echo -e "  SSH:   ${CYAN}${ssh_url}${NC}"
+                        echo -e "  HTTPS: ${CYAN}${https_url}${NC}"
+                        read -e -p "Set this as 'origin' for the current directory? (y/N): " DOORIGIN
+                        if [[ "$DOORIGIN" =~ ^[Yy]$ ]]; then
+                            echo -e "  [1] Use SSH  [2] Use HTTPS"
+                            read -e -p "  Choice [1-2]: " PROTO
+                            local chosen_url="$ssh_url"
+                            [[ "$PROTO" == "2" ]] && chosen_url="$https_url"
+                            git remote remove origin 2>/dev/null || true
+                            run_git remote add origin "$chosen_url"
+                            echo -e "${GREEN}[✔] 'origin' set to ${chosen_url}${NC}"
+                        fi
+                    else
+                        echo -e "${RED}[!] Couldn't fetch that repo's URL — check the name and your access.${NC}"
+                    fi
+                fi
+                pause
+                ;;
+            4)
+                read -e -p "Full repo name (owner/repo or namespace/project): " N
+                read -e -p "Their username: " UN
+                if [[ "$VCS_PROVIDER" == "github" ]]; then
+                    echo -e "  [1] Read (pull)  [2] Write (push)  [3] Maintain  [4] Admin"
+                    read -e -p "Permission level [1-4]: " PL
+                    local perm="pull"
+                    case $PL in 2) perm="push" ;; 3) perm="maintain" ;; 4) perm="admin" ;; esac
+                else
+                    echo -e "  [1] Reporter  [2] Developer  [3] Maintainer  [4] Owner"
+                    read -e -p "Permission level [1-4]: " PL
+                    local perm="20"
+                    case $PL in 2) perm="30" ;; 3) perm="40" ;; 4) perm="50" ;; esac
+                fi
+                if [[ -n "$N" && -n "$UN" ]] && confirm_destructive "Grant '${UN}' access to '${N}'"; then
+                    safe_run "Add collaborator ${UN}" vcs_add_collaborator "$N" "$UN" "$perm"
+                    log_action "Added collaborator ${UN} to ${N} (${VCS_PROVIDER})"
+                fi
+                pause
+                ;;
+            5)
+                read -e -p "New name for THIS repo: " N
                 if [[ -n "$N" ]] && confirm_destructive "Rename this repo to '${N}'"; then
                     vcs_rename_repo "$N"
                     log_action "Renamed repo to ${N}"
                 fi
                 pause
                 ;;
-            3)
-                read -p "Full name of repo to DELETE (owner/repo): " N
+            6)
+                read -e -p "Full name of repo to DELETE (owner/repo): " N
                 if [[ -n "$N" ]] && confirm_destructive "PERMANENTLY DELETE '${N}' — this cannot be undone"; then
-                    vcs_delete_repo "$N"
-                    log_action "DELETED repo: ${N}"
+                    local del_out
+                    del_out=$(vcs_delete_repo "$N" 2>&1)
+                    local del_code=$?
+                    if [[ $del_code -ne 0 ]]; then
+                        echo -e "${RED}${BOLD}⚠️  Delete failed:${NC}"
+                        echo -e "${YELLOW}${del_out}${NC}\n"
+                        if echo "$del_out" | grep -qi "delete_repo\|scope\|403\|permission"; then
+                            echo -e "${CYAN}This is almost always a missing OAuth scope — your login token was never granted delete permission (GitHub keeps this scope separate from everything else on purpose, as a safety measure).${NC}"
+                            if [[ "$VCS_PROVIDER" == "github" ]]; then
+                                echo -e "${CYAN}Fix: run this once, then retry:${NC} ${GREEN}gh auth refresh -h github.com -s delete_repo${NC}"
+                                read -e -p "Run that now? (y/N): " DOREFRESH
+                                if [[ "$DOREFRESH" =~ ^[Yy]$ ]]; then
+                                    gh auth refresh -h github.com -s delete_repo
+                                    echo -e "${CYAN}Re-run Delete once you've confirmed the browser auth step.${NC}"
+                                fi
+                            else
+                                echo -e "${CYAN}Fix: run:${NC} ${GREEN}glab auth login --scopes api,delete_repo${NC} ${CYAN}(or add the 'api' scope to your GitLab token, which covers delete)${NC}"
+                            fi
+                        fi
+                    else
+                        echo -e "${GREEN}[✔] Deleted.${NC}"
+                        log_action "DELETED repo: ${N}"
+                    fi
                 fi
                 pause
                 ;;
-            4) break ;;
+            0) break ;;
         esac
     done
 }
@@ -2505,7 +3420,7 @@ cc_api_explorer() {
     show_header
     echo -e "${YELLOW}${BOLD}🔬 RAW API EXPLORER (${VCS_PROVIDER^}) — Advanced${NC}\n"
     echo -e "${CYAN}Enter a raw API path, e.g.: repos/OWNER/REPO/contents  (GitHub) or projects/ID/issues (GitLab)${NC}\n"
-    read -p "API path: " PATH_IN
+    read -e -p "API path: " PATH_IN
     if [[ -n "$PATH_IN" ]]; then
         vcs_api "$PATH_IN"
     fi
@@ -2529,38 +3444,38 @@ github_power_tools_menu() {
         local gist_label="Gists"
         [[ "$VCS_PROVIDER" == "gitlab" ]] && gist_label="Snippets"
 
-        echo -e "  ${GREEN}[1]${NC} Issues"
-        echo -e "  ${GREEN}[2]${NC} ${pr_label}"
-        echo -e "  ${GREEN}[3]${NC} Releases"
-        echo -e "  ${GREEN}[4]${NC} ${ci_label} / CI"
-        echo -e "  ${GREEN}[5]${NC} ${gist_label}"
-        echo -e "  ${GREEN}[6]${NC} Codespaces ${CYAN}$([[ "$VCS_PROVIDER" != "github" ]] && echo '(GitHub only)')${NC}"
-        echo -e "  ${GREEN}[7]${NC} Repo / Project Admin"
-        echo -e "  ${GREEN}[8]${NC} Raw API Explorer (advanced)"
-        echo -e "  ${GREEN}[9]${NC} Delta Diff Suite"
-        echo -e "  ${GREEN}[10]${NC} Switch Provider (currently: ${VCS_PROVIDER^})"
-        echo -e "  ${GREEN}[11]${NC} Back to Main Menu"
+        echo -e "  ${GREEN}[1]${NC} Switch Provider (currently: ${VCS_PROVIDER^})"
+        echo -e "  ${GREEN}[2]${NC} Issues"
+        echo -e "  ${GREEN}[3]${NC} ${pr_label}"
+        echo -e "  ${GREEN}[4]${NC} Releases"
+        echo -e "  ${GREEN}[5]${NC} ${ci_label} / CI"
+        echo -e "  ${GREEN}[6]${NC} ${gist_label}"
+        echo -e "  ${GREEN}[7]${NC} Codespaces ${CYAN}$([[ "$VCS_PROVIDER" != "github" ]] && echo '(GitHub only)')${NC}"
+        echo -e "  ${GREEN}[8]${NC} Repo / Project Admin"
+        echo -e "  ${GREEN}[9]${NC} Raw API Explorer (advanced)"
+        echo -e "  ${GREEN}[10]${NC} Delta Diff Suite"
+        echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
-        read -p "Select choice [1-11]: " GPCHOICE
+        read -e -p "Select choice [0-10]: " GPCHOICE
         case $GPCHOICE in
-            1) ensure_vcs_ready && cc_issues_menu ;;
-            2) ensure_vcs_ready && cc_change_requests_menu ;;
-            3) ensure_vcs_ready && cc_releases_menu ;;
-            4) ensure_vcs_ready && cc_runs_menu ;;
-            5) ensure_vcs_ready && cc_snippets_menu ;;
-            6) ensure_vcs_ready && cc_codespaces_menu ;;
-            7) ensure_vcs_ready && cc_repo_admin_menu ;;
-            8) ensure_vcs_ready && cc_api_explorer ;;
-            9) delta_diff_suite_menu ;;
-            10)
+            1)
                 echo -e "  [1] GitHub  [2] GitLab"
-                read -p "Choice [1-2]: " SW
+                read -e -p "Choice [1-2]: " SW
                 case $SW in
                     1) VCS_PROVIDER="github" ;;
                     2) VCS_PROVIDER="gitlab" ;;
                 esac
                 ;;
-            11) break ;;
+            2) ensure_vcs_ready && cc_issues_menu ;;
+            3) ensure_vcs_ready && cc_change_requests_menu ;;
+            4) ensure_vcs_ready && cc_releases_menu ;;
+            5) ensure_vcs_ready && cc_runs_menu ;;
+            6) ensure_vcs_ready && cc_snippets_menu ;;
+            7) ensure_vcs_ready && cc_codespaces_menu ;;
+            8) ensure_vcs_ready && cc_repo_admin_menu ;;
+            9) ensure_vcs_ready && cc_api_explorer ;;
+            10) delta_diff_suite_menu ;;
+            0) break ;;
         esac
     done
 }
@@ -2586,26 +3501,27 @@ module_5_menu() {
         echo -e "      ${CYAN}You're the only one working — even across multiple machines. Pulls before every push.${NC}"
         echo -e "  ${GREEN}[2]${NC} Team Mode (private repo, collaborators)"
         echo -e "      ${CYAN}Others have write access to YOUR repo. Everyone branches, you review & merge.${NC}"
+        echo -e "  ${GREEN}[3]${NC} Admin Dashboard"
+        echo -e "      ${CYAN}Review a teammate's pushed branch (diff), then merge or reject it — no need to enter Team Mode first.${NC}"
         if [[ "$WIZARD_MODE" == "advanced" ]]; then
-            echo -e "  ${GREEN}[3]${NC} Open-Source Contributor Mode (fork + PR)"
+            echo -e "  ${GREEN}[4]${NC} Open-Source Contributor Mode (fork + PR)"
             echo -e "      ${CYAN}You're contributing to someone ELSE'S repo (or accepting outside PRs on yours).${NC}"
         else
-            echo -e "  ${CYAN}[3]${NC} Open-Source Contributor Mode ${YELLOW}(switch to Advanced Mode to unlock)${NC}"
+            echo -e "  ${CYAN}[4]${NC} Open-Source Contributor Mode ${YELLOW}(switch to Advanced Mode to unlock)${NC}"
             echo -e "      ${CYAN}Fork/upstream/PR workflow for contributing to repos you don't own.${NC}"
         fi
-        echo -e "  ${GREEN}[4]${NC} GitHub CLI Hub (list repos, browse full file/folder tree, PRs, auth)"
-        echo -e "      ${CYAN}Everything gh-powered — including the file/folder browser, not just README.${NC}"
-        echo -e "  ${GREEN}[5]${NC} Safe Update Sync (protects local work while pulling)"
+        echo -e "  ${GREEN}[5]${NC} Git CLI Hub ${CYAN}(GitHub + GitLab${NC} — list repos, browse full file/folder tree, history, auth)"
+        echo -e "      ${CYAN}Everything gh/glab-powered — including the file/folder browser and commit history, not just README.${NC}"
+        echo -e "  ${GREEN}[6]${NC} Safe Update Sync (protects local work while pulling)"
         echo -e "      ${CYAN}Stashes your uncommitted work, pulls latest, restores your work on top.${NC}"
-        echo -e "  ${GREEN}[6]${NC} Repo History Viewer"
-        echo -e "      ${CYAN}Shows commit graph across all branches (uses 'delta' for prettier diffs if installed).${NC}"
-        echo -e "  ${GREEN}[7]${NC} Back to Main Menu"
+        echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
-        read -p "Select choice [1-7]: " M5_CHOICE
+        read -e -p "Select choice [0-6]: " M5_CHOICE
         case $M5_CHOICE in
             1) linear_workflow ;;
             2) team_mode ;;
-            3)
+            3) team_mode_admin_dashboard ;;
+            4)
                 if [[ "$WIZARD_MODE" == "advanced" ]]; then
                     oss_contributor_mode
                 else
@@ -2613,12 +3529,20 @@ module_5_menu() {
                     sleep 2
                 fi
                 ;;
-            4) github_cli_hub_menu ;;
-            5) safe_update_sync ;;
-            6) repo_history_viewer ;;
-            7) break ;;
+            5) vcs_cli_hub_menu ;;
+            6) safe_update_sync ;;
+            0) break ;;
         esac
     done
+}
+
+# git-absorb installs as a git SUBCOMMAND (/usr/lib/git-core/git-absorb on
+# Debian/Kali), invoked as "git absorb" — NOT a standalone "git-absorb" binary
+# on PATH. `command -v git-absorb` will never find it even when correctly
+# installed; this checks the way git itself actually resolves subcommands.
+git_absorb_available() {
+    git absorb -h &>/dev/null
+    [[ $? -ne 127 ]]
 }
 
 # ==============================================================================
@@ -2632,13 +3556,15 @@ bonus_tools_menu() {
         echo -e "  ${GREEN}[2]${NC} git-absorb — auto-squash fixups into the right earlier commit"
         echo -e "  ${GREEN}[3]${NC} ghq — organized local clone manager (works for GitHub AND GitLab repos)"
         echo -e "  ${GREEN}[4]${NC} Local CI Testing (act for GitHub Actions / gitlab-ci-local for GitLab CI)"
-        echo -e "  ${GREEN}[5]${NC} Back"
-        read -p "Select choice [1-5]: " BCHOICE
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select choice [0-4]: " BCHOICE
         case $BCHOICE in
             1)
                 show_header
                 if command -v lazygit &>/dev/null; then
                     echo -e "${CYAN}--> Launching lazygit...${NC}"
+                    echo -e "${YELLOW}    (Inside lazygit: press 'q' to quit and return here — NOT Ctrl+C, that can interrupt mid-operation.)${NC}"
+                    sleep 2
                     (cd "$TARGET_REPO_DIR" && lazygit)
                 else
                     echo -e "${YELLOW}[i] 'lazygit' is not installed.${NC}"
@@ -2648,34 +3574,159 @@ bonus_tools_menu() {
                 ;;
             2)
                 show_header
-                if command -v git-absorb &>/dev/null; then
-                    echo -e "${CYAN}--> Running git-absorb (dry run first)...${NC}"
-                    (cd "$TARGET_REPO_DIR" && git absorb --dry-run)
-                    read -p "Apply for real? (y/N): " DOABSORB
-                    if [[ "$DOABSORB" =~ ^[Yy]$ ]]; then
-                        (cd "$TARGET_REPO_DIR" && git absorb --and-rebase)
-                        log_action "Ran git-absorb --and-rebase"
-                    fi
-                else
+                if ! git_absorb_available; then
                     echo -e "${YELLOW}[i] 'git-absorb' is not installed.${NC}"
                     offer_install "git-absorb"
+                    hash -r 2>/dev/null || true
+                    if ! git_absorb_available; then
+                        echo -e "${RED}[!] Still not available as 'git absorb' after install attempt.${NC}"
+                        echo -e "${CYAN}--> Running diagnostics...${NC}\n"
+
+                        local dpkg_status dpkg_files core_path found_path
+                        dpkg_status=$(dpkg -l git-absorb 2>/dev/null | tail -1)
+                        dpkg_files=$(dpkg -L git-absorb 2>/dev/null)
+                        core_path=$(git --exec-path 2>/dev/null)
+                        found_path=""
+                        for p in "${core_path}/git-absorb" /usr/lib/git-core/git-absorb /usr/bin/git-absorb /usr/local/bin/git-absorb "$HOME/.local/bin/git-absorb" "$HOME/.cargo/bin/git-absorb"; do
+                            [[ -x "$p" ]] && found_path="$p" && break
+                        done
+
+                        echo -e "${CYAN}  dpkg status line:${NC} ${dpkg_status:-<no dpkg record found>}"
+                        if [[ -n "$dpkg_files" ]]; then
+                            echo -e "${CYAN}  dpkg -L git-absorb lists:${NC}"
+                            echo "$dpkg_files" | sed 's/^/    /'
+                        fi
+
+                        if [[ -n "$found_path" ]]; then
+                            echo -e "\n${GREEN}[✔] Found the binary at: ${found_path}${NC}"
+                            echo -e "${CYAN}    NOTE: git-absorb installs as a git SUBCOMMAND, not a standalone command.${NC}"
+                            echo -e "${CYAN}    Call it as '${GREEN}git absorb${CYAN}' (with a space) — NOT '${GREEN}git-absorb${CYAN}' as one word.${NC}"
+                            echo -e "${CYAN}    Try: ${GREEN}git --exec-path${NC} ${CYAN}— if it doesn't match the path above, git's exec-path is misconfigured; otherwise this is just a stale check, retry this menu now.${NC}"
+                        else
+                            echo -e "\n${RED}[!] No git-absorb binary found anywhere on disk, despite apt reporting it installed.${NC}"
+                            echo -e "${CYAN}    Try the reliable Rust-native install instead:${NC}"
+                            if command -v cargo &>/dev/null; then
+                                read -e -p "    Install via cargo now? (y/N): " DOCARGO
+                                if [[ "$DOCARGO" =~ ^[Yy]$ ]]; then
+                                    cargo install git-absorb
+                                    hash -r 2>/dev/null || true
+                                fi
+                            else
+                                echo -e "${GREEN}      sudo apt install cargo && cargo install git-absorb${NC}"
+                            fi
+                        fi
+                        pause
+                        continue
+                    fi
+                    echo -e "${GREEN}[✔] git-absorb is now available (as 'git absorb').${NC}"
+                fi
+                echo -e "${CYAN}--> Running git-absorb (dry run first)...${NC}"
+                (cd "$TARGET_REPO_DIR" && git absorb --dry-run)
+                read -e -p "Apply for real? (y/N): " DOABSORB
+                if [[ "$DOABSORB" =~ ^[Yy]$ ]]; then
+                    (cd "$TARGET_REPO_DIR" && git absorb --and-rebase)
+                    log_action "Ran git-absorb --and-rebase"
                 fi
                 pause
                 ;;
             3)
-                show_header
                 if command -v ghq &>/dev/null; then
-                    echo -e "${CYAN}Your ghq-managed repos:${NC}\n"
-                    ghq list
-                    echo -e "\n  [1] Clone a new repo via ghq   [2] Back"
-                    read -p "Choice [1-2]: " GQ
-                    if [[ "$GQ" == "1" ]]; then
-                        read -p "Repo URL: " GURL
-                        [[ -n "$GURL" ]] && ghq get "$GURL"
-                    fi
+                    while true; do
+                        show_header
+                        echo -e "${YELLOW}${BOLD}📁 GHQ — MANAGED CLONES${NC}\n"
+                        local ghq_lines=()
+                        while IFS= read -r r; do
+                            [[ -n "$r" ]] && ghq_lines+=("repo"$'\t'"$r")
+                        done < <(ghq list)
+
+                        echo -e "  ${GREEN}[1]${NC} Clone a New Repo via ghq"
+                        echo -e "  ${GREEN}[2]${NC} Push Updates for a Cloned Repo"
+                        echo -e "  ${RED}[3]${NC} Delete a Cloned Repo Locally ${RED}(local folder only, NOT the remote)${NC}"
+                        echo -e "  ${GREEN}[0]${NC} Back"
+                        read -e -p "Choice [0-3]: " GQ
+                        case $GQ in
+                            1)
+                                read -e -p "Repo URL: " GURL
+                                [[ -n "$GURL" ]] && ghq get "$GURL"
+                                pause
+                                ;;
+                            2)
+                                if [[ ${#ghq_lines[@]} -eq 0 ]]; then
+                                    echo -e "${YELLOW}[i] No ghq-managed repos yet.${NC}"
+                                    pause
+                                    continue
+                                fi
+                                if select_from_lines_interactive "SELECT A REPO TO PUSH" "${ghq_lines[@]}"; then
+                                    local ghq_root repo_path
+                                    ghq_root=$(ghq root)
+                                    repo_path="${ghq_root}/${SELECTED_LINE#*$'\t'}"
+                                    if [[ -d "$repo_path" ]]; then
+                                        show_header
+                                        echo -e "${CYAN}--> ${repo_path}${NC}\n"
+                                        (cd "$repo_path" && git status --porcelain)
+
+                                        # git rev-parse --abbrev-ref HEAD returns the literal
+                                        # string "HEAD" on a repo with zero commits (unborn
+                                        # branch) — that's what caused "src refspec HEAD does
+                                        # not match any". symbolic-ref reads the INTENDED
+                                        # branch name regardless of whether it has commits yet.
+                                        local br has_commits
+                                        br=$(cd "$repo_path" && git symbolic-ref --short HEAD 2>/dev/null)
+                                        has_commits="true"
+                                        (cd "$repo_path" && git rev-parse HEAD &>/dev/null) || has_commits="false"
+
+                                        if [[ -z "$br" ]]; then
+                                            echo -e "${RED}[!] Couldn't determine a branch name (detached HEAD?). Skipping push.${NC}"
+                                        elif [[ "$has_commits" == "false" ]]; then
+                                            echo -e "${YELLOW}[i] This repo has no commits yet — nothing to push.${NC}"
+                                            if [[ -n "$(cd "$repo_path" && git status --porcelain)" ]]; then
+                                                read -e -p "Stage and make an initial commit now? (y/N): " DOINIT
+                                                if [[ "$DOINIT" =~ ^[Yy]$ ]]; then
+                                                    (cd "$repo_path" && git add . && read -e -p "Commit message: " CM && git commit -m "$CM")
+                                                    safe_run "Push ${br}" bash -c "cd '$repo_path' && git push -u origin '$br'"
+                                                fi
+                                            else
+                                                echo -e "${CYAN}    Add some files first, then come back to push.${NC}"
+                                            fi
+                                        else
+                                            if [[ -n "$(cd "$repo_path" && git status --porcelain)" ]]; then
+                                                (cd "$repo_path" && git add . && read -e -p "Commit message: " CM && git commit -m "$CM")
+                                            fi
+                                            safe_run "Push ${br}" bash -c "cd '$repo_path' && git push origin '$br'"
+                                        fi
+                                    fi
+                                fi
+                                pause
+                                ;;
+                            3)
+                                if [[ ${#ghq_lines[@]} -eq 0 ]]; then
+                                    echo -e "${YELLOW}[i] No ghq-managed repos yet.${NC}"
+                                    pause
+                                    continue
+                                fi
+                                if select_from_lines_interactive "SELECT A REPO TO DELETE LOCALLY" "${ghq_lines[@]}"; then
+                                    local ghq_root repo_path
+                                    ghq_root=$(ghq root)
+                                    repo_path="${ghq_root}/${SELECTED_LINE#*$'\t'}"
+                                    if confirm_destructive "Delete local clone at ${repo_path} (remote on GitHub/GitLab is NOT touched)"; then
+                                        rm -rf "$repo_path"
+                                        echo -e "${GREEN}[✔] Local clone removed.${NC}"
+                                        log_action "Removed ghq clone: ${repo_path}"
+                                    fi
+                                fi
+                                pause
+                                ;;
+                            0) break ;;
+                        esac
+                    done
                 else
+                    show_header
                     echo -e "${YELLOW}[i] 'ghq' is not installed.${NC}"
                     offer_install "ghq"
+                    hash -r 2>/dev/null || true
+                    if command -v ghq &>/dev/null; then
+                        echo -e "${GREEN}[✔] ghq is now available — reopen this menu to use it.${NC}"
+                    fi
                 fi
                 pause
                 ;;
@@ -2683,6 +3734,16 @@ bonus_tools_menu() {
                 show_header
                 echo -e "${YELLOW}${BOLD}🧪 LOCAL CI TESTING${NC}\n"
                 echo -e "${CYAN}Runs your CI pipeline locally in Docker BEFORE you push — needs Docker installed & running.${NC}\n"
+                if command -v docker &>/dev/null; then
+                    if docker info &>/dev/null; then
+                        echo -e "${GREEN}[✔] Docker is installed and the daemon is running.${NC}\n"
+                    else
+                        echo -e "${RED}[!] Docker is installed but the daemon isn't running (or you lack permission).${NC}"
+                        echo -e "${CYAN}    Try: sudo systemctl start docker   (or restart Docker Desktop if that's what you use)${NC}\n"
+                    fi
+                else
+                    echo -e "${RED}[!] Docker is not installed. Local CI testing needs it — install Docker first.${NC}\n"
+                fi
                 if [[ -f "${TARGET_REPO_DIR}/.github/workflows" || -d "${TARGET_REPO_DIR}/.github/workflows" ]]; then
                     echo -e "${GREEN}[✔] Detected .github/workflows — this repo uses GitHub Actions.${NC}"
                     if command -v act &>/dev/null; then
@@ -2700,7 +3761,7 @@ bonus_tools_menu() {
                     else
                         echo -e "${YELLOW}[i] 'gitlab-ci-local' is not installed (npm package).${NC}"
                         echo -e "    Install with: ${GREEN}npm install -g gitlab-ci-local${NC}"
-                        read -p "  Install now? (y/N): " DOGCL
+                        read -e -p "  Install now? (y/N): " DOGCL
                         if [[ "$DOGCL" =~ ^[Yy]$ ]] && command -v npm &>/dev/null; then
                             npm install -g gitlab-ci-local
                         elif [[ "$DOGCL" =~ ^[Yy]$ ]]; then
@@ -2712,7 +3773,7 @@ bonus_tools_menu() {
                 fi
                 pause
                 ;;
-            5) break ;;
+            0) break ;;
         esac
     done
 }
@@ -2722,7 +3783,15 @@ check_tool_stack_versions() {
     echo -e "${YELLOW}${BOLD}🔎 TOOL STACK VERSIONS${NC}\n"
     local tools=("git" "gh" "glab" "delta" "chafa" "lazygit" "git-absorb" "ghq" "act" "pre-commit")
     for t in "${tools[@]}"; do
-        if command -v "$t" &>/dev/null; then
+        if [[ "$t" == "git-absorb" ]]; then
+            if git_absorb_available; then
+                local v
+                v=$(git absorb --version 2>/dev/null | head -1)
+                echo -e "  ${GREEN}[✔]${NC} ${BOLD}${t}${NC}: ${v:-installed} ${CYAN}(called as 'git absorb')${NC}"
+            else
+                echo -e "  ${RED}[✘]${NC} ${BOLD}${t}${NC}: not installed"
+            fi
+        elif command -v "$t" &>/dev/null; then
             local v
             v=$("$t" --version 2>/dev/null | head -1)
             echo -e "  ${GREEN}[✔]${NC} ${BOLD}${t}${NC}: ${v}"
@@ -2730,16 +3799,158 @@ check_tool_stack_versions() {
             echo -e "  ${RED}[✘]${NC} ${BOLD}${t}${NC}: not installed"
         fi
     done
-    echo -e "\n${CYAN}[i] This tool doesn't auto-check upstream latest versions to avoid extra network calls on every check.${NC}"
-    echo -e "${CYAN}    Compare against release pages manually if you suspect something's outdated.${NC}"
+    echo -e "\n${CYAN}[i] Want to check these against the latest releases? Use 'Check for Updates' from Settings.${NC}"
     pause
 }
 
+# --- Maps a tool name to its GitHub repo + local version-extraction command,
+#     for binary-only update checks/installs (never via apt/dnf/pacman) ---
+_tool_update_repo() {
+    case "$1" in
+        gh) echo "cli/cli" ;;
+        delta) echo "dandavison/delta" ;;
+        glab) echo "" ;;  # glab uses its own GitLab API lookup, see _tool_latest_tag
+        git-absorb) echo "tummychow/git-absorb" ;;
+        ghq) echo "x-motemen/ghq" ;;
+        *) echo "" ;;
+    esac
+}
+
+_tool_latest_tag() {
+    # glab's canonical releases live on GitLab, not the stale GitHub mirror —
+    # everything else is fetched from GitHub's API as usual.
+    local t="$1"
+    if [[ "$t" == "glab" ]]; then
+        curl -fsSL --max-time 8 "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases?per_page=1&order_by=released_at&sort=desc" 2>/dev/null \
+            | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"v?([^"]+)".*/\1/'
+    else
+        local repo
+        repo=$(_tool_update_repo "$t")
+        [[ -z "$repo" ]] && return
+        curl -fsSL --max-time 8 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+            | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"v?([^"]+)".*/\1/'
+    fi
+}
+
+_tool_installed_version() {
+    local t="$1" raw
+    raw=$("$t" --version 2>/dev/null | head -1)
+    echo "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1
+}
+
+check_tool_stack_updates() {
+    show_header
+    echo -e "${YELLOW}${BOLD}🔄 CHECK FOR TOOL UPDATES${NC}\n"
+    echo -e "${CYAN}Checking installed binaries against their latest releases (GitHub or GitLab API, per tool)...${NC}\n"
+
+    local checkable=("gh" "delta" "glab" "git-absorb" "ghq")
+    local -a outdated=()
+    local -a uptodate=()
+    local -a notinstalled=()
+
+    for t in "${checkable[@]}"; do
+        if [[ "$t" == "git-absorb" ]]; then
+            if ! git_absorb_available; then
+                notinstalled+=("$t")
+                continue
+            fi
+        elif ! command -v "$t" &>/dev/null; then
+            notinstalled+=("$t")
+            continue
+        fi
+        local installed_v latest_v
+        if [[ "$t" == "git-absorb" ]]; then
+            installed_v=$(git absorb --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        else
+            installed_v=$(_tool_installed_version "$t")
+        fi
+        latest_v=$(_tool_latest_tag "$t")
+
+        if [[ -z "$latest_v" ]]; then
+            echo -e "  ${YELLOW}[i] ${t}: could not reach the release API to check (offline/rate-limited)${NC}"
+            continue
+        fi
+
+        if [[ "$installed_v" == "$latest_v" ]]; then
+            echo -e "  ${GREEN}[✔] ${t}: up to date (${installed_v})${NC}"
+            uptodate+=("$t")
+        else
+            echo -e "  ${YELLOW}[⬆] ${t}: ${installed_v:-unknown} -> ${latest_v} available${NC}"
+            outdated+=("$t")
+        fi
+    done
+
+    if [[ ${#notinstalled[@]} -gt 0 ]]; then
+        echo -e "\n${CYAN}Not installed (skipped): ${notinstalled[*]}${NC}"
+    fi
+
+    if [[ ${#outdated[@]} -eq 0 ]]; then
+        echo -e "\n${GREEN}[✔] Everything checkable is up to date.${NC}"
+        pause
+        return
+    fi
+
+    echo ""
+    local lines=("all"$'\t'"Update ALL outdated tools (${outdated[*]})")
+    for t in "${outdated[@]}"; do
+        lines+=("$t"$'\t'"Update just: ${t}")
+    done
+    lines+=("cancel"$'\t'"Cancel — don't update anything")
+
+    if ! select_from_lines_interactive "📌 SELECT WHAT TO UPDATE (binary install only, not apt/dnf/pacman)" "${lines[@]}"; then
+        return
+    fi
+    local pick="${SELECTED_LINE%%$'\t'*}"
+
+    if [[ "$pick" == "cancel" ]]; then
+        echo -e "${YELLOW}[i] Cancelled.${NC}"
+        pause
+        return
+    fi
+
+    show_header
+    if [[ "$pick" == "all" ]]; then
+        for t in "${outdated[@]}"; do
+            echo -e "${CYAN}--> Updating ${t} via binary pull...${NC}"
+            install_from_binary "$t"
+            echo ""
+        done
+    else
+        echo -e "${CYAN}--> Updating ${pick} via binary pull...${NC}"
+        install_from_binary "$pick"
+    fi
+    hash -r 2>/dev/null || true
+    echo -e "\n${GREEN}[✔] Update pass complete.${NC}"
+    pause
+}
+
+tool_stack_manager_menu() {
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}🧰 TOOL STACK MANAGER${NC}\n"
+        echo -e "${CYAN}Everything about the external tools git-wizard depends on or extends — lives here now.${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} Cross-Distro Package Verification (gh, glab, delta, chafa)"
+        echo -e "  ${GREEN}[2]${NC} Check Tool Stack Versions"
+        echo -e "  ${GREEN}[3]${NC} Check for Tool Updates (binary-only)"
+        echo -e "  ${GREEN}[4]${NC} Bonus Tools (lazygit, git-absorb, ghq, local CI runners)"
+        echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
+        echo -e "\n===================================================================="
+        read -e -p "Select choice [0-4]: " TSCHOICE
+        case $TSCHOICE in
+            1) check_optional_tools ;;
+            2) check_tool_stack_versions ;;
+            3) check_tool_stack_updates ;;
+            4) bonus_tools_menu ;;
+            0) break ;;
+        esac
+    done
+}
 
 load_config
 if [[ -z "$WIZARD_MODE" ]]; then
     mode_selection_wrapper
 fi
+ensure_global_cli_persisted
 maybe_auto_check_updates
 
 while true; do
@@ -2755,15 +3966,17 @@ while true; do
     echo -e "  ${GREEN}[4]${NC} Conventional Commit Assistant"
     echo -e "      ${CYAN}Builds a properly formatted commit message (feat/fix/docs/etc).${NC}"
     echo -e "  ${YELLOW}${BOLD}[5] ⚡ Team & Open-Source Collaboration${NC}"
-    echo -e "      ${CYAN}Solo, private-team, fork-based, and GitHub CLI Hub workflows.${NC}"
-    echo -e "  ${GREEN}[6]${NC} Enable Universal Global CLI"
-    echo -e "      ${CYAN}Lets you run 'git-wizard' from any folder on this machine.${NC}"
-    echo -e "  ${YELLOW}${BOLD}[7] ⚡ Git Hosting Power Tools (GitHub/GitLab)${NC}"
+    echo -e "      ${CYAN}Solo, private-team, fork-based, and Git CLI Hub workflows.${NC}"
+    echo -e "  ${YELLOW}${BOLD}[6] ⚡ Git Hosting Power Tools (GitHub/GitLab)${NC}"
     echo -e "      ${CYAN}Issues, PRs/MRs, Releases, Actions/Pipelines, Gists/Snippets, Repo Admin, Delta Diff Suite.${NC}"
-    echo -e "  ${GREEN}[8]${NC} Settings ${CYAN}(Mode / Dry-Run / Package Check / Updates / Action History)${NC}"
-    echo -e "  ${GREEN}[9]${NC} Exit"
+    echo -e "  ${GREEN}[7]${NC} Universal Global CLI: currently ${BOLD}${GLOBAL_CLI_ENABLED^^}${NC}"
+    echo -e "      ${CYAN}Lets you run 'git-wizard' from any folder, any terminal, permanently — until you disable it.${NC}"
+    echo -e "  ${YELLOW}${BOLD}[8] 🧰 Tool Stack Manager${NC}"
+    echo -e "      ${CYAN}Cross-distro checks, versions, updates, and bonus tools (lazygit, git-absorb, ghq, local CI).${NC}"
+    echo -e "  ${GREEN}[9]${NC} Settings ${CYAN}(Mode / Dry-Run / Sync Panel / Updates / Action History)${NC}"
+    echo -e "  ${GREEN}[0]${NC} Exit"
     echo -e "\n===================================================================="
-    read -p "Enter choice [1-9]: " MAIN_CHOICE
+    read -e -p "Enter choice [0-9]: " MAIN_CHOICE
 
     case $MAIN_CHOICE in
         1) manage_identity ;;
@@ -2771,40 +3984,58 @@ while true; do
         3) manage_branches ;;
         4) commit_assistant ;;
         5) module_5_menu ;;
-        6) enable_global_cli ;;
-        7) github_power_tools_menu ;;
-        8)
+        6) github_power_tools_menu ;;
+        7)
+            if [[ "$GLOBAL_CLI_ENABLED" == "true" ]]; then
+                echo -e "\n${CYAN}Global CLI is already enabled.${NC}"
+                echo -e "  [1] Re-run setup (repair symlink/PATH)   [2] Disable it   [3] Cancel"
+                read -e -p "Choice [1-3]: " GC
+                case $GC in
+                    1) enable_global_cli ;;
+                    2) disable_global_cli ;;
+                    *) ;;
+                esac
+            else
+                enable_global_cli
+            fi
+            ;;
+        8) tool_stack_manager_menu ;;
+        9)
             while true; do
                 show_header
                 echo -e "${YELLOW}${BOLD}⚙️ SETTINGS${NC}\n"
                 echo -e "  ${GREEN}[1]${NC} Switch Mode (current: ${WIZARD_MODE})"
                 echo -e "  ${GREEN}[2]${NC} Toggle Dry-Run (current: ${DRY_RUN})"
                 echo -e "  ${GREEN}[3]${NC} GitHub Sync Panel Settings (on/off, detail level)"
-                echo -e "  ${GREEN}[4]${NC} Cross-Distro Package Verification (gh, glab, delta, chafa)"
-                echo -e "  ${GREEN}[5]${NC} View Tool Action History"
-                echo -e "  ${GREEN}[6]${NC} Check for git-wizard Updates ${CYAN}(source: ${UPDATE_REPO:-not set})${NC}"
-                echo -e "  ${GREEN}[7]${NC} Set Update Source Repo"
-                echo -e "  ${GREEN}[8]${NC} Setup Pre-Commit Hooks for THIS repo"
-                echo -e "  ${GREEN}[9]${NC} Bonus Tools (lazygit, git-absorb, ghq, local CI runners)"
-                echo -e "  ${GREEN}[10]${NC} Check Tool Stack Versions"
-                echo -e "  ${GREEN}[11]${NC} Back"
-                read -p "Select choice [1-11]: " S_CHOICE
+                echo -e "  ${GREEN}[4]${NC} View Tool Action History"
+                echo -e "  ${GREEN}[5]${NC} Check for git-wizard Updates ${CYAN}(source: ${UPDATE_REPO:-not set})${NC}"
+                echo -e "  ${GREEN}[6]${NC} Set Update Source Repo"
+                echo -e "  ${GREEN}[7]${NC} Create git-wizard Checkpoint Now (manual backup point)"
+                echo -e "  ${GREEN}[8]${NC} Update git-wizard Now"
+                echo -e "  ${GREEN}[9]${NC} Rollback git-wizard to Previous Version"
+                echo -e "  ${GREEN}[10]${NC} Setup Pre-Commit Hooks for THIS repo"
+                echo -e "  ${GREEN}[11]${NC} Enable Universal Global CLI Permanently (current: ${GLOBAL_CLI_ENABLED})"
+                echo -e "  ${GREEN}[12]${NC} Disable Universal Global CLI Permanently"
+                echo -e "  ${GREEN}[0]${NC} Back"
+                read -e -p "Select choice [0-12]: " S_CHOICE
                 case $S_CHOICE in
-                    1) toggle_mode ;;
-                    2) toggle_dry_run ;;
+                    1) select_wizard_mode ;;
+                    2) select_dry_run_state ;;
                     3) github_sync_menu ;;
-                    4) check_optional_tools ;;
-                    5) show_action_history ;;
-                    6) show_header; check_for_updates; pause ;;
-                    7) configure_update_repo ;;
-                    8) setup_precommit_hooks ;;
-                    9) bonus_tools_menu ;;
-                    10) check_tool_stack_versions ;;
-                    11) break ;;
+                    4) show_action_history ;;
+                    5) show_header; check_for_updates; pause ;;
+                    6) configure_update_repo ;;
+                    7) create_tool_checkpoint ;;
+                    8) update_git_wizard ;;
+                    9) rollback_git_wizard ;;
+                    10) setup_precommit_hooks ;;
+                    11) enable_global_cli ;;
+                    12) disable_global_cli ;;
+                    0) break ;;
                 esac
             done
             ;;
-        9) echo -e "\n${GREEN}Keep building amazing open-source software! Goodbye!${NC}"; exit 0 ;;
+        0) echo -e "\n${GREEN}Keep building amazing open-source software! Goodbye!${NC}"; exit 0 ;;
         *) echo -e "${RED}Invalid selection!${NC}"; sleep 1 ;;
     esac
 done

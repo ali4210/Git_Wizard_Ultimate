@@ -1,5 +1,5 @@
 # ==============================================================================
-# ENGINE NAME: identity-engine.ps1 (PowerShell 5.1 Clean Edition - Back Fixed)
+# ENGINE NAME: identity-engine.ps1 (PowerShell 5.1 Clean Edition - Back=0)
 # ==============================================================================
 
 function Clean-RemoteUrl ($url) {
@@ -16,10 +16,10 @@ function Manage-Identity {
         Write-Host "  [2] Generate New SSH Key (ED25519) and Show Public Key" -ForegroundColor Green
         Write-Host "  [3] Test SSH Connection to GitHub" -ForegroundColor Green
         Write-Host "  [4] Inspect and Manage Remote Repository URLs" -ForegroundColor Green
-        Write-Host "  [5] Back to Main Menu" -ForegroundColor Green
+        Write-Host "  [0] Back to Main Menu" -ForegroundColor Green
         Write-Host "`n====================================================================" -ForegroundColor Cyan
 
-        $choice = Read-Host "Select choice [1-5]"
+        $choice = Read-Host "Select choice [0-4]"
 
         switch ($choice) {
             "1" {
@@ -81,9 +81,9 @@ function Manage-Identity {
                     Write-Host "-----------------------------------------------------`n" -ForegroundColor Cyan
                     Write-Host "  [1] Change / Set New Remote URL (Overwrite Existing)" -ForegroundColor Green
                     Write-Host "  [2] Toggle Protocol (Switch between HTTPS and SSH)" -ForegroundColor Green
-                    Write-Host "  [3] Back to Module 1 Menu" -ForegroundColor Green
+                    Write-Host "  [0] Back to Module 1 Menu" -ForegroundColor Green
 
-                    $remoteChoice = Read-Host "Select choice [1-3]"
+                    $remoteChoice = Read-Host "Select choice [0-2]"
                     if ($remoteChoice -eq "1") {
                         $rawUrl = Read-Host "Enter fresh GitHub Remote URL (HTTPS or SSH)"
                         $newUrl = Clean-RemoteUrl -url $rawUrl
@@ -117,12 +117,12 @@ function Manage-Identity {
                             Write-Host "[!] Unrecognized URL format." -ForegroundColor Red
                         }
                         Pause-Console
-                    } elseif ($remoteChoice -eq "3") {
+                    } elseif ($remoteChoice -eq "0") {
                         break
                     }
                 }
             }
-            "5" { return }
+            "0" { return }
             default { Write-Host "Invalid selection!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
         }
     }
