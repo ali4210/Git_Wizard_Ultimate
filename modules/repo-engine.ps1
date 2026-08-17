@@ -39,11 +39,12 @@ function Manage-Repo {
                         Pause-Console
                         continue
                     }
-                    Invoke-GitWizard commit -m "$msg" | Out-Null
-                    $branch = git rev-parse --abbrev-ref HEAD 2>$null
-                    if (-not $branch) { $branch = "main" }
-                    if (-not (Invoke-GitWizard push origin "$branch")) {
-                        Write-Host "[!] Push rejected. Use Option [6] to resolve." -ForegroundColor Yellow
+                    if (Invoke-CommitWithHookRetry -Message "$msg") {
+                        $branch = git rev-parse --abbrev-ref HEAD 2>$null
+                        if (-not $branch) { $branch = "main" }
+                        if (-not (Invoke-GitWizard push origin "$branch")) {
+                            Write-Host "[!] Push rejected. Use Option [6] to resolve." -ForegroundColor Yellow
+                        }
                     }
                 }
                 Pause-Console
@@ -212,7 +213,7 @@ function Invoke-OneClickRepoSetup {
         if (git status --porcelain) {
             $msg = Read-Host "Commit message [default: Initial commit]"
             if (-not $msg) { $msg = "Initial commit" }
-            Invoke-GitWizard commit -m "$msg" | Out-Null
+            Invoke-CommitWithHookRetry -Message "$msg" | Out-Null
         }
         $rawUrl = Read-Host "Enter Remote URL (or ENTER to keep current)"
         $remoteUrl = Clean-RemoteUrl -url $rawUrl
@@ -244,7 +245,7 @@ function Invoke-OneClickRepoSetup {
     if (git status --porcelain) {
         $msg = Read-Host "Commit message [default: Initial commit]"
         if (-not $msg) { $msg = "Initial commit" }
-        Invoke-GitWizard commit -m "$msg" | Out-Null
+        Invoke-CommitWithHookRetry -Message "$msg" | Out-Null
     } else {
         Write-Host "[i] Nothing to commit." -ForegroundColor Yellow
     }

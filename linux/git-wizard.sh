@@ -130,6 +130,38 @@ run_git() {
 }
 
 # ==============================================================================
+# COMMIT WITH HOOK-RETRY
+# Wraps `git commit` so pre-commit hooks that auto-fix files (trailing
+# whitespace, EOF newlines, etc.) and exit non-zero ON PURPOSE don't block
+# the workflow. Retries the commit ONCE after re-staging, but ONLY if the
+# failure left new unstaged changes behind (the hook's fingerprint) — a
+# genuine hook failure (lint error, oversized file, conflict marker) still
+# stops here and shows the real error instead of retrying blindly.
+# Usage: commit_with_hook_retry "commit message"   → returns 0/1
+# ==============================================================================
+commit_with_hook_retry() {
+    local msg="$1"
+    local retried="false"
+    while true; do
+        if run_git commit -m "$msg"; then
+            return 0
+        fi
+
+        if [[ "$retried" == "false" && -n "$(git status --porcelain)" ]]; then
+            echo -e "\n${YELLOW}[i] A pre-commit hook modified your files (formatting auto-fixes) — that's expected.${NC}"
+            echo -e "${CYAN}--> Re-staging the fixed files and retrying the commit...${NC}\n"
+            run_git add .
+            retried="true"
+            continue
+        fi
+
+        echo -e "${RED}[!] Commit failed — this looks like a real hook failure, not just auto-fixed formatting.${NC}"
+        echo -e "${YELLOW}    Check the hook output above, fix the issue, then try again.${NC}"
+        return 1
+    done
+}
+
+# ==============================================================================
 # SAFETY & BACKUP ENGINE
 # Creates a lightweight recovery point before destructive operations.
 # ==============================================================================
@@ -2657,9 +2689,11 @@ manage_repo() {
                         pause
                         continue
                     fi
-                    run_git commit -m "$MSG"
-                    BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-                    run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [6].${NC}"
+
+                    if commit_with_hook_retry "$MSG"; then
+                        BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+                        run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push rejected. Use Option [6].${NC}"
+                    fi
                 fi
                 pause
                 ;;
@@ -2788,7 +2822,7 @@ one_click_repo_setup() {
         run_git add .
         if [[ -n "$(git status --porcelain)" ]]; then
             read -e -p "Commit message [default: Initial commit]: " MSG
-            run_git commit -m "${MSG:-Initial commit}"
+            commit_with_hook_retry "${MSG:-Initial commit}"
         fi
         read -e -p "Enter Remote URL (or ENTER to keep current): " RAW_URL
         REMOTE_URL=$(clean_remote_url "$RAW_URL")
@@ -2824,7 +2858,7 @@ one_click_repo_setup() {
         echo -e "${YELLOW}[i] Nothing to commit.${NC}"
     else
         read -e -p "Commit message [default: Initial commit]: " MSG
-        run_git commit -m "${MSG:-Initial commit}"
+        commit_with_hook_retry "${MSG:-Initial commit}"
     fi
 
     local uname full_name urlpair ssh_url https_url chosen_url
@@ -3132,7 +3166,7 @@ commit_assistant() {
     read -e -p "Execute commit now? (y/N): " DO_COMMIT
     if [[ "$DO_COMMIT" =~ ^[Yy]$ ]]; then
         run_git add .
-        run_git commit -m "$FINAL_MSG"
+        commit_with_hook_retry "$FINAL_MSG"
     fi
     pause
 }
@@ -3161,7 +3195,7 @@ linear_workflow() {
     if [[ -n "$(git status --porcelain)" ]]; then
         read -e -p "Enter commit message: " MSG
         if [[ -n "$MSG" ]]; then
-            run_git commit -m "$MSG"
+            commit_with_hook_retry "$MSG"
         fi
     fi
     run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Push failed. Check your remote/connection, then retry.${NC}"
@@ -3197,7 +3231,7 @@ team_mode_start_task() {
         if [[ -z "$CMSG" ]]; then
             CMSG="${PREFIX}: ${TNAME}"
         fi
-        run_git commit -m "$CMSG"
+        commit_with_hook_retry "$CMSG"
     fi
 
     run_git push -u origin "$BRANCH_NAME" || { echo -e "${RED}[!] Push failed. Your branch and commit exist locally — check your remote/connection, then push manually.${NC}"; pause; return; }

@@ -169,6 +169,39 @@ function Invoke-GitWizard {
 }
 
 # ==============================================================================
+# COMMIT WITH HOOK-RETRY
+# Wraps 'git commit' so pre-commit hooks that auto-fix files (trailing
+# whitespace, EOF newlines, etc.) and exit non-zero ON PURPOSE don't block
+# the workflow. Retries the commit ONCE after re-staging, but ONLY if the
+# failure left new unstaged changes behind (the hook's fingerprint) — a
+# genuine hook failure (lint error, oversized file, conflict marker) still
+# stops here and shows the real error instead of retrying blindly.
+# Usage: Invoke-CommitWithHookRetry -Message "commit message"   -> returns $true/$false
+# ==============================================================================
+function Invoke-CommitWithHookRetry {
+    param([string]$Message)
+    $retried = $false
+    while ($true) {
+        if (Invoke-GitWizard commit -m "$Message") {
+            return $true
+        }
+
+        $stillDirty = git status --porcelain
+        if (-not $retried -and $stillDirty) {
+            Write-Host "`n[i] A pre-commit hook modified your files (formatting auto-fixes) - that's expected." -ForegroundColor Yellow
+            Write-Host "--> Re-staging the fixed files and retrying the commit...`n" -ForegroundColor Cyan
+            Invoke-GitWizard add . | Out-Null
+            $retried = $true
+            continue
+        }
+
+        Write-Host "[!] Commit failed - this looks like a real hook failure, not just auto-fixed formatting." -ForegroundColor Red
+        Write-Host "    Check the hook output above, fix the issue, then try again." -ForegroundColor Yellow
+        return $false
+    }
+}
+
+# ==============================================================================
 # SAFETY & BACKUP ENGINE
 # Creates a lightweight recovery point before destructive operations.
 # ==============================================================================
