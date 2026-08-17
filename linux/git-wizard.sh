@@ -1503,15 +1503,1061 @@ ensure_global_cli_persisted() {
     fi
 }
 # ==============================================================================
-# MODULE 1: Identity & SSH Manager  (unchanged logic, routed through run_git where relevant)
+# SSH GITHUB SETUP END-TO-END
+# Generates a new ED25519 SSH key (if none exists), starts ssh-agent,
+# adds the key to the agent, and pushes the public key to GitHub via `gh`.
+# End-to-end: zero browser, zero copy-paste. Asks for custom title.
+# ==============================================================================
+one_click_ssh_to_github() {
+    show_header
+    echo -e "${YELLOW}${BOLD}🚀 SSH GITHUB SETUP END-TO-END${NC}\n"
+    echo -e "${CYAN}This will automatically:${NC}"
+    echo -e "  ${GREEN}1.${NC} Check for existing SSH keys"
+    echo -e "  ${GREEN}2.${NC} Generate a new ED25519 key (with your custom title) if needed"
+    echo -e "  ${GREEN}3.${NC} Start ssh-agent & load the key"
+    echo -e "  ${GREEN}4.${NC} Upload the public key to your GitHub account via API"
+    echo -e "  ${GREEN}5.${NC} Test the SSH connection to GitHub"
+    echo ""
+
+    # --- Prerequisite: gh CLI must be installed ---
+    if ! command -v gh &>/dev/null; then
+        echo -e "${RED}[!] 'gh' (GitHub CLI) is required for automatic key upload.${NC}"
+        suggest_install "gh"
+        pause
+        return
+    fi
+
+    # --- Prerequisite: gh must be authenticated ---
+    if ! gh auth status &>/dev/null; then
+        echo -e "${RED}[!] 'gh' is installed but NOT logged in to GitHub.${NC}"
+        echo -e "${CYAN}    Run this first: ${GREEN}gh auth login${NC}"
+        echo -e "${CYAN}    Then come back and retry this option.${NC}"
+        pause
+        return
+    fi
+
+    local gh_user
+    gh_user=$(gh api user --jq '.login' 2>/dev/null)
+    echo -e "${GREEN}[✔] GitHub CLI authenticated as: ${BOLD}${gh_user}${NC}\n"
+
+    local CUSTOM_KEY_TITLE=""  # Will hold the user's desired title for GitHub
+
+    # --- Step 1: Check for existing SSH keys ---
+    echo -e "${CYAN}[1/5] Checking for existing SSH keys...${NC}"
+    local SSH_DIR="${HOME}/.ssh"
+    local KEY_PATH="${SSH_DIR}/id_ed25519"
+    local PUB_PATH="${KEY_PATH}.pub"
+    local KEY_EXISTS="false"
+
+    if [[ -f "$KEY_PATH" && -f "$PUB_PATH" ]]; then
+        KEY_EXISTS="true"
+        echo -e "${YELLOW}[i] Found existing key: ${KEY_PATH}${NC}"
+        local fingerprint
+        fingerprint=$(ssh-keygen -lf "$PUB_PATH" 2>/dev/null | awk '{print $2}')
+        echo -e "${CYAN}    Fingerprint: ${fingerprint}${NC}"
+        echo ""
+        read -e -p "    Generate a NEW key instead? (y/N): " GEN_NEW
+        if [[ "$GEN_NEW" =~ ^[Yy]$ ]]; then
+            local ts
+            ts=$(date '+%Y%m%d-%H%M%S')
+            KEY_PATH="${SSH_DIR}/id_ed25519-gitwizard-${ts}"
+            PUB_PATH="${KEY_PATH}.pub"
+            KEY_EXISTS="false"
+            echo -e "${CYAN}    Will generate new key at: ${KEY_PATH}${NC}"
+        fi
+    elif [[ -f "${SSH_DIR}/id_rsa" && -f "${SSH_DIR}/id_rsa.pub" ]]; then
+        echo -e "${YELLOW}[i] Found old-style RSA key: ${SSH_DIR}/id_rsa${NC}"
+        echo -e "${CYAN}    ED25519 is faster and more secure. Recommend generating a new one.${NC}"
+        echo ""
+        read -e -p "    Generate a new ED25519 key? (Y/n): " GEN_NEW
+        if [[ "$GEN_NEW" =~ ^[Yy]$ || -z "$GEN_NEW" ]]; then
+            local ts
+            ts=$(date '+%Y%m%d-%H%M%S')
+            KEY_PATH="${SSH_DIR}/id_ed25519-gitwizard-${ts}"
+            PUB_PATH="${KEY_PATH}.pub"
+            KEY_EXISTS="false"
+        else
+            KEY_PATH="${SSH_DIR}/id_rsa"
+            PUB_PATH="${SSH_DIR}/id_rsa.pub"
+            KEY_EXISTS="true"
+        fi
+    fi
+
+    # --- Step 2: Generate key if needed (with Title Prompt) ---
+    if [[ "$KEY_EXISTS" != "true" ]]; then
+        echo -e "\n${CYAN}[2/5] Naming your new SSH key...${NC}"
+        echo -e "${CYAN}    (This title will appear in your GitHub SSH settings table)${NC}"
+        read -e -p "    Enter a title for this key (e.g., 'My-Kali-VM'): " CUSTOM_KEY_TITLE
+
+        # Fallback if user just presses ENTER
+        if [[ -z "$CUSTOM_KEY_TITLE" ]]; then
+            local ts_fb
+            ts_fb=$(date '+%Y%m%d-%H%M%S')
+            CUSTOM_KEY_TITLE="git-wizard-auto-$(hostname)-${ts_fb}"
+            echo -e "    ${YELLOW}No title entered. Using default: ${CUSTOM_KEY_TITLE}${NC}"
+        fi
+
+        echo -e "\n${CYAN}    Generating ED25519 SSH key...${NC}"
+        mkdir -p "$SSH_DIR"
+        chmod 700 "$SSH_DIR"
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo -e "${YELLOW}[DRY-RUN] Would execute: ssh-keygen -t ed25519 -C \"${gh_user}@git-wizard\" -f ${KEY_PATH} -N \"\"${NC}"
+            log_action "DRY-RUN: would generate SSH key at ${KEY_PATH}"
+        else
+            ssh-keygen -t ed25519 -C "${gh_user}@git-wizard" -f "$KEY_PATH" -N "" 2>&1
+            if [[ $? -ne 0 ]]; then
+                echo -e "${RED}[!] ssh-keygen failed.${NC}"
+                pause
+                return
+            fi
+            chmod 600 "$KEY_PATH"
+            chmod 644 "$PUB_PATH"
+            echo -e "${GREEN}[✔] Key generated: ${KEY_PATH}${NC}"
+            echo -e "${GREEN}[✔] GitHub Title: ${BOLD}${CUSTOM_KEY_TITLE}${NC}"
+            log_action "Generated new SSH key: ${KEY_PATH} (Title: ${CUSTOM_KEY_TITLE})"
+        fi
+    else
+        echo -e "${GREEN}[✔] Using existing key: ${KEY_PATH}${NC}"
+        echo -e "${CYAN}[2/5] Skipped — key already exists.${NC}"
+    fi
+
+    # --- Step 3: Start ssh-agent & add key ---
+    echo -e "\n${CYAN}[3/5] Starting ssh-agent & loading key...${NC}"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY-RUN] Would start ssh-agent and add ${KEY_PATH}${NC}"
+    else
+        if [[ -n "$SSH_AGENT_PID" ]]; then
+            kill "$SSH_AGENT_PID" 2>/dev/null || true
+            unset SSH_AGENT_PID
+            unset SSH_AUTH_SOCK
+        fi
+        eval "$(ssh-agent -s)" >/dev/null 2>&1
+        ssh-add "$KEY_PATH" 2>&1
+        if [[ $? -eq 0 ]]; then
+            echo -e "${GREEN}[✔] Key added to ssh-agent (PID: ${SSH_AGENT_PID})${NC}"
+        else
+            echo -e "${YELLOW}[!] ssh-add returned non-zero. Key file exists but agent may have issues.${NC}"
+            echo -e "${CYAN}    Connection test below will confirm if it works regardless.${NC}"
+        fi
+    fi
+
+    # --- Step 3.5: Pre-check — is this key ALREADY on GitHub? ---
+    echo -e "\n${CYAN}[3.5/5] Checking if this key is already on your GitHub account...${NC}"
+    local NEEDS_UPLOAD="true"
+    local LOCAL_FP
+    LOCAL_FP=$(ssh-keygen -lf "$PUB_PATH" 2>/dev/null | awk '{print $2}')
+    local GH_FINGERPRINTS
+    GH_FINGERPRINTS=$(gh api user/keys --jq '.[].fingerprint' 2>/dev/null)
+
+    if [[ -n "$GH_FINGERPRINTS" ]] && echo "$GH_FINGERPRINTS" | grep -qF "$LOCAL_FP"; then
+        NEEDS_UPLOAD="false"
+        echo -e "${YELLOW}[i] This exact key is ALREADY on your GitHub account.${NC}"
+        echo -e "${CYAN}    GitHub does not allow duplicate keys. No upload needed.${NC}"
+        local MATCHED_TITLE
+        MATCHED_TITLE=$(gh api user/keys --jq ".[] | select(.fingerprint == \"${LOCAL_FP}\") | .title" 2>/dev/null)
+        if [[ -n "$MATCHED_TITLE" ]]; then
+            echo -e "${CYAN}    Registered on GitHub as: ${GREEN}${MATCHED_TITLE}${NC}"
+        fi
+    else
+        echo -e "${GREEN}[✔] This key is NOT on GitHub yet — upload will proceed.${NC}"
+    fi
+
+    # --- Step 4: Upload public key to GitHub via `gh ssh-key add` ---
+    echo -e "\n${CYAN}[4/5] Uploading public key to GitHub account '${gh_user}'...${NC}"
+
+    if [[ "$NEEDS_UPLOAD" != "true" ]]; then
+        echo -e "${CYAN}    Skipped — key already present on GitHub (see step 3.5 above).${NC}"
+
+    elif [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY-RUN] Would execute: gh ssh-key add ${PUB_PATH} --title \"${CUSTOM_KEY_TITLE}\"${NC}"
+        log_action "DRY-RUN: would upload SSH key to GitHub"
+
+    else
+        # Use the custom title if provided, otherwise fallback to a generic upload title
+        local key_title="$CUSTOM_KEY_TITLE"
+        if [[ -z "$key_title" ]]; then
+            key_title="git-wizard-upload-$(hostname)-$(date '+%Y%m%d-%H%M%S')"
+        fi
+
+        local upload_output
+        upload_output=$(gh ssh-key add "$PUB_PATH" --title "$key_title" 2>&1)
+        local upload_exit=$?
+
+        if [[ $upload_exit -eq 0 ]] && ! echo "$upload_output" | grep -qi "error\|fail\|already"; then
+            echo -e "${GREEN}[✔] Public key uploaded to GitHub!${NC}"
+            echo -e "${CYAN}    Title on GitHub: ${BOLD}${key_title}${NC}"
+            log_action "Uploaded SSH key to GitHub: ${key_title}"
+        elif echo "$upload_output" | grep -qi "already"; then
+            echo -e "${YELLOW}[i] This key is already on GitHub. No duplicate was created.${NC}"
+            log_action "SSH key already present on GitHub, skipped upload"
+        else
+            echo -e "${RED}[!] Failed to upload key to GitHub.${NC}"
+            echo -e "${YELLOW}    Error: ${upload_output}${NC}"
+            echo ""
+            echo -e "${CYAN}    Fallback — copy this key manually to:${NC}"
+            echo -e "${CYAN}    GitHub → Settings → SSH and GPG keys → New SSH key${NC}"
+            echo ""
+            echo -e "${BOLD}─── PUBLIC KEY (copy below) ───${NC}"
+            cat "$PUB_PATH"
+            echo -e "${BOLD}─── END PUBLIC KEY ───${NC}"
+            pause
+            return
+        fi
+    fi
+
+    # --- Step 5: Test connection ---
+    echo -e "\n${CYAN}[5/5] Testing SSH connection to GitHub...${NC}"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY-RUN] Would execute: ssh -T git@github.com${NC}"
+    else
+        echo -e "${CYAN}    (waiting 3 seconds for GitHub to propagate the key...)${NC}"
+        sleep 3
+
+        local test_output
+        test_output=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -T git@github.com 2>&1)
+
+        if echo "$test_output" | grep -qi "successfully authenticated"; then
+            echo -e "${GREEN}${BOLD}[✔] SSH CONNECTION TO GITHUB IS WORKING!${NC}"
+            echo -e "${GREEN}    ${test_output}${NC}"
+        elif echo "$test_output" | grep -qi "permission denied"; then
+            echo -e "${RED}[!] Permission denied — GitHub doesn't recognize this key.${NC}"
+            echo -e "${YELLOW}    This can happen if GitHub hasn't finished propagating.${NC}"
+            echo -e "${YELLOW}    Wait 30 seconds and test manually: ${GREEN}ssh -T git@github.com${NC}"
+        else
+            echo -e "${YELLOW}[i] Unexpected response:${NC}"
+            echo -e "    ${test_output}${NC}"
+        fi
+    fi
+
+    # --- Summary ---
+    echo -e "\n${GREEN}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}  ✅ SSH-TO-GITHUB PIPELINE COMPLETE!${NC}"
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}  Key file:      ${KEY_PATH}${NC}"
+    echo -e "${CYAN}  Public key:    ${PUB_PATH}${NC}"
+    echo -e "${CYAN}  GitHub user:   ${gh_user}${NC}"
+    if [[ "$NEEDS_UPLOAD" != "true" ]]; then
+        echo -e "${YELLOW}  Upload:        Skipped — key was already on GitHub${NC}"
+    else
+        echo -e "${GREEN}  Upload Title:  ${CUSTOM_KEY_TITLE:-Default}  (Added to GitHub)${NC}"
+    fi
+    echo -e "${CYAN}  You can now use SSH URLs: ${GREEN}git@github.com:user/repo.git${NC}"
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════════${NC}"
+
+    log_action "One-click SSH-to-GitHub pipeline completed (key: ${KEY_PATH})"
+    pause
+}
+# ==============================================================================
+# GITHUB SSH KEY MANAGER (List, Delete, & Purge All)
+# Audits all SSH keys registered on your GitHub account and allows safe
+# removal of stale/orphaned keys (e.g., from destroyed VMs), or a full
+# nuclear purge of every key at once.
+# ==============================================================================
+# ==============================================================================
+# GITHUB SSH KEY MANAGER (Interactive TUI - Perfect Table & Purge)
+# ==============================================================================
+manage_github_ssh_keys() {
+    if ! command -v gh &>/dev/null; then
+        echo -e "${RED}[!] 'gh' (GitHub CLI) is required.${NC}"
+        suggest_install "gh"
+        pause
+        return
+    fi
+    if ! command -v jq &>/dev/null; then
+        echo -e "${RED}[!] 'jq' is required to parse the key table.${NC}"
+        echo -e "${CYAN}    Install with: ${GREEN}sudo apt install jq${NC}"
+        pause
+        return
+    fi
+    if ! gh auth status &>/dev/null; then
+        echo -e "${RED}[!] 'gh' is not logged in. Run: ${GREEN}gh auth login${NC}"
+        pause
+        return
+    fi
+
+    local gh_user
+    gh_user=$(gh api user --jq '.login' 2>/dev/null)
+    local GRAY='\033[90m'
+    local DIM='\033[2m'
+
+    # --- Internal: Draw the Perfect Table ---
+    _draw_table() {
+        local json="$1"
+        clear
+        echo -e "${YELLOW}${BOLD}🔑 GITHUB SSH KEY MANAGER (${gh_user})${NC}\n"
+
+        local count
+        count=$(echo "$json" | jq '. | length')
+
+        # Precise column widths: ID=12, TITLE=30, FINGERPRINT=40, DATE=12
+        local sep_top="┌────────────┬──────────────────────────────┬────────────────────────────────────────┬────────────┐"
+        local sep_mid="├────────────┼──────────────────────────────┼────────────────────────────────────────┼────────────┤"
+        local sep_bot="└────────────┴──────────────────────────────┴────────────────────────────────────────┴────────────┘"
+
+        echo -e "${CYAN}${sep_top}${NC}"
+        printf "${CYAN}│${BOLD} %-10s ${NC}${CYAN}│${BOLD} %-28s ${NC}${CYAN}│${BOLD} %-40s ${NC}${CYAN}│${BOLD} %-10s ${NC}${CYAN}│${NC}\n" "ID" "TITLE" "FINGERPRINT" "ADDED ON"
+        echo -e "${CYAN}${sep_mid}${NC}"
+
+        if [[ "$count" -eq 0 ]]; then
+            printf "${CYAN}│${NC} %-10s ${CYAN}│${NC} %-28s ${CYAN}│${NC} %-40s ${CYAN}│${NC} %-10s ${CYAN}│${NC}\n" "" "No keys found" "" ""
+        else
+            # Safely handle null values using jq's // syntax
+            echo "$json" | jq -r '.[] | "\(.id)|\(.title // "Untitled")|\(.fingerprint // "N/A")|\(.created_at // "Unknown")"' | while IFS='|' read -r id title fp created; do
+                printf "${CYAN}│${NC} %-10s ${CYAN}│${NC} %-28s ${CYAN}│${NC} %-40s ${CYAN}│${NC} %-10s ${CYAN}│${NC}\n" "${id:0:10}" "${title:0:28}" "${fp:0:40}" "${created%%T*}"
+            done
+        fi
+        echo -e "${CYAN}${sep_bot}${NC}"
+    }
+
+    # --- Internal: Arrow Key Selector ---
+    _arrow_select_key() {
+        local json="$1"
+        tput civis 2>/dev/null
+
+        local ids=(); local titles=(); local fps=()
+        while IFS='|' read -r id title fp created; do
+            ids+=("$id")
+            titles+=("${title:-Untitled}")
+            [[ "$fp" == "null" || -z "$fp" ]] && fp="N/A"
+            fps+=("$fp")
+        done < <(echo "$json" | jq -r '.[] | "\(.id)|\(.title)|\(.fingerprint)|\(.created_at)"')
+
+        local count=${#ids[@]}
+        local selected=0
+
+        while true; do
+            clear
+            echo -e "${RED}${BOLD}🗑️  SELECT A KEY TO DELETE${NC}\n"
+            echo -e "${DIM}Use arrow keys to navigate, ENTER to select, Q to cancel.${NC}\n"
+
+            for ((i=0; i<count; i++)); do
+                if [[ $i -eq $selected ]]; then
+                    printf "  ${GREEN}➤ [${CYAN}%-10s${GREEN}] ${BOLD}%-30s${NC} ${GRAY}| %.48s${NC}\n" "${ids[$i]}" "${titles[$i]}" "${fps[$i]}"
+                else
+                    printf "  ${GRAY}  [%-10s] %-30s | %.48s${NC}\n" "${ids[$i]}" "${titles[$i]}" "${fps[$i]}"
+                fi
+            done
+
+            echo -e "\n${CYAN}[↑/↓] Navigate   [ENTER] Select   [Q] Cancel${NC}"
+
+            local key
+            IFS= read -rsn1 key
+            if [[ $key == $'\x1b' ]]; then
+                read -rsn2 -t 0.1 key
+                case "$key" in
+                    '[A') ((selected--)); [ $selected -lt 0 ] && selected=$((count-1)) ;;
+                    '[B') ((selected++)); [ $selected -ge count ] && selected=0 ;;
+                esac
+            elif [[ -z "$key" ]]; then
+                tput cnorm 2>/dev/null
+                _arrow_confirm_delete "${ids[$selected]}" "${titles[$selected]}" "${fps[$selected]}"
+                return $?
+            elif [[ "$key" =~ ^[Qq]$ ]]; then
+                tput cnorm 2>/dev/null
+                return 2
+            fi
+        done
+    }
+
+    # --- Internal: Arrow Key Yes/No Confirmation ---
+    _arrow_confirm_delete() {
+        local id="$1" title="$2" fp="$3"
+        local selected="Yes"
+
+        while true; do
+            clear
+            echo -e "${RED}${BOLD}⚠️  DELETE THIS KEY?${NC}\n"
+            echo -e "  ${BOLD}Title:${NC}       ${title}"
+            echo -e "  ${BOLD}Fingerprint:${NC} ${fp}"
+            echo -e "  ${BOLD}ID:${NC}          ${id}\n"
+            echo -e "  Are you sure you want to permanently delete this key?\n"
+
+            if [[ "$selected" == "Yes" ]]; then
+                echo -e "  ${GREEN}➤ [ YES ]     ${GRAY}[ NO ]${NC}"
+            else
+                echo -e "  ${GRAY}[ YES ]     ${RED}➤ [ NO ]${NC}"
+            fi
+
+            echo -e "\n${CYAN}[←/→] Toggle   [ENTER] Confirm   [Q] Cancel${NC}"
+
+            local key
+            IFS= read -rsn1 key
+            if [[ $key == $'\x1b' ]]; then
+                read -rsn2 -t 0.1 key
+                case "$key" in
+                    '[D') selected="Yes" ;;
+                    '[C') selected="No" ;;
+                esac
+            elif [[ -z "$key" ]]; then
+                if [[ "$selected" == "Yes" ]]; then
+                    echo -e "\n${CYAN}--> Deleting key from GitHub...${NC}"
+                    if gh api -X DELETE "/user/keys/${id}" &>/dev/null; then
+                        echo -e "${GREEN}${BOLD}[✔] Successfully deleted: ${title}${NC}"
+                        log_action "Deleted GitHub SSH key: ${title} (ID: ${id})"
+                        sleep 1
+                        return 0
+                    else
+                        echo -e "${RED}[!] Failed to delete key.${NC}"
+                        sleep 2
+                        return 1
+                    fi
+                else
+                    return 1
+                fi
+            elif [[ "$key" =~ ^[Qq]$ ]]; then
+                return 1
+            fi
+        done
+    }
+
+    # ==========================================================================
+    # MAIN MENU LOOP
+    # ==========================================================================
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}🔑 GITHUB SSH KEY MANAGER (${gh_user})${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} 📋 List & Manage SSH Keys (Interactive Table)"
+        echo -e "  ${RED}[2]${NC} ☢️  PURGE ALL SSH KEYS (delete every key)"
+        echo -e "  ${GREEN}[0]${NC} Back to SSH Manager"
+        echo -e "\n===================================================================="
+        read -e -p "Select choice [0-2]: " KEY_MGR_CHOICE
+
+        case $KEY_MGR_CHOICE in
+            1)
+                while true; do
+                    local keys_json
+                    keys_json=$(gh api user/keys --paginate 2>&1)
+
+                    if [[ $? -ne 0 ]] || [[ -z "$keys_json" ]]; then
+                        echo -e "${RED}[!] Failed to fetch keys.${NC}"; pause; break
+                    fi
+
+                    local key_count
+                    key_count=$(echo "$keys_json" | jq '. | length')
+
+                    _draw_table "$keys_json"
+
+                    if [[ "$key_count" -eq 0 ]]; then
+                        echo -e "\n${YELLOW}[i] No keys to manage.${NC}"
+                        pause
+                        break
+                    fi
+
+                    echo ""
+                    read -e -p "Press [D] to select a key for deletion, or [ENTER] to go back: " LIST_ACTION
+
+                    if [[ "$LIST_ACTION" =~ ^[Dd]$ ]]; then
+                        _arrow_select_key "$keys_json"
+                        local select_status=$?
+                        if [[ $select_status -eq 0 ]]; then
+                            continue
+                        else
+                            break
+                        fi
+                    else
+                        break
+                    fi
+                done
+                ;;
+            2)
+                echo -e "\n${CYAN}Fetching all SSH keys for purge preview...${NC}\n"
+                local keys_json
+                keys_json=$(gh api user/keys --paginate 2>&1)
+
+                if [[ $? -ne 0 ]] || [[ -z "$keys_json" ]]; then
+                    echo -e "${RED}[!] Failed to fetch keys.${NC}"; pause; continue
+                fi
+
+                local key_count
+                key_count=$(echo "$keys_json" | jq '. | length')
+
+                if [[ "$key_count" -eq 0 ]]; then
+                    echo -e "${GREEN}[✔] You already have 0 keys. Nothing to purge.${NC}"
+                    pause
+                    continue
+                fi
+
+                _draw_table "$keys_json"
+
+                echo ""
+                echo -e "${RED}${BOLD}⚠  WARNING:${NC}"
+                echo -e "${RED}   After this, ${BOLD}NO${RED} machine will be able to SSH into your GitHub account${NC}"
+                echo -e "${RED}   until you generate a new key and add it (SSH Manager → Option 3).${NC}"
+                echo ""
+
+                if confirm_destructive "Purge ALL ${key_count} SSH key(s) from your GitHub account"; then
+                    echo -e "\n${CYAN}--> Purging all SSH keys...${NC}"
+                    local success_count=0; local fail_count=0
+                    local key_ids
+                    key_ids=$(echo "$keys_json" | jq -r '.[].id')
+
+                    for kid in $key_ids; do
+                        local kid_title
+                        kid_title=$(echo "$keys_json" | jq -r ".[] | select(.id == ${kid}) | .title")
+                        if gh api -X DELETE "/user/keys/${kid}" &>/dev/null; then
+                            echo -e "  ${GREEN}✘${NC} Deleted: ${kid_title}"
+                            success_count=$((success_count + 1))
+                        else
+                            echo -e "  ${RED}✘${NC} FAILED: ${kid_title}"
+                            fail_count=$((fail_count + 1))
+                        fi
+                    done
+
+                    echo -e "\n${GREEN}${BOLD}═══════════════════════════════════════${NC}"
+                    echo -e "${GREEN}${BOLD}  ☢️  PURGE COMPLETE${NC}"
+                    echo -e "${GREEN}${BOLD}═══════════════════════════════════════${NC}"
+                    echo -e "  Deleted: ${GREEN}${success_count}${NC}  |  Failed: ${RED}${fail_count}${NC}"
+                    echo -e "${CYAN}  Next: Use SSH Manager → Option 3 to add a fresh key.${NC}"
+                    echo -e "${GREEN}${BOLD}═══════════════════════════════════════${NC}"
+                    log_action "PURGED all GitHub SSH keys (deleted: ${success_count}, failed: ${fail_count})"
+                else
+                    echo -e "\n${YELLOW}[i] Purge cancelled. All keys are safe.${NC}"
+                fi
+                pause
+                ;;
+            0) break ;;
+            *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+# ==============================================================================
+# SSH SERVICE INSTALLER & STARTER
+# Ensures openssh-client and openssh-server are installed, then starts
+# and enables the service so the machine is ready for key generation.
+# ==============================================================================
+install_and_start_ssh() {
+    show_header
+    echo -e "${YELLOW}${BOLD}📡 SSH SERVICE INSTALLER & STARTER${NC}\n"
+
+    local pm
+    pm=$(detect_pkg_manager)
+
+    local ssh_installed="true"
+    if ! command -v ssh &>/dev/null; then ssh_installed="false"; fi
+    if ! command -v ssh-keygen &>/dev/null; then ssh_installed="false"; fi
+
+    if [[ "$ssh_installed" == "false" ]]; then
+        echo -e "${CYAN}[1/3] Installing OpenSSH Client & Server...${NC}"
+        local cmd
+        case "$pm" in
+            apt)    cmd="sudo apt update && sudo apt install -y openssh-client openssh-server" ;;
+            dnf)    cmd="sudo dnf install -y openssh-clients openssh-server" ;;
+            pacman) cmd="sudo pacman -S --noconfirm openssh" ;;
+            brew)   echo -e "${YELLOW}[i] macOS comes with SSH pre-installed. Skipping package install.${NC}"; cmd="" ;;
+            *)      echo -e "${RED}[!] Unsupported package manager.${NC}"; pause; return ;;
+        esac
+
+        if [[ -n "$cmd" ]]; then
+            if eval "$cmd"; then
+                echo -e "${GREEN}[✔] OpenSSH installed successfully via ${pm}.${NC}"
+                log_action "Installed OpenSSH via ${pm}"
+            else
+                echo -e "${RED}[!] Failed to install OpenSSH.${NC}"
+                pause
+                return
+            fi
+        fi
+    else
+        echo -e "${GREEN}[✔] SSH tools are already installed.${NC}"
+        echo -e "${CYAN}[1/3] Skipped.${NC}"
+    fi
+
+    echo -e "\n${CYAN}[2/3] Starting SSH service...${NC}"
+    if sudo systemctl start ssh 2>/dev/null || sudo systemctl start sshd 2>/dev/null; then
+        echo -e "${GREEN}[✔] SSH service started.${NC}"
+    else
+        echo -e "${YELLOW}[!] Could not start SSH service (might not be applicable on all systems, or requires sudo).${NC}"
+    fi
+
+    echo -e "\n${CYAN}[3/3] Enabling SSH service on boot...${NC}"
+    if sudo systemctl enable ssh 2>/dev/null || sudo systemctl enable sshd 2>/dev/null; then
+        echo -e "${GREEN}[✔] SSH service enabled on boot.${NC}"
+    else
+        echo -e "${YELLOW}[!] Could not enable SSH service on boot.${NC}"
+    fi
+
+    echo -e "\n${GREEN}${BOLD}═══════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}  ✅ SSH MANAGER END-TO-END APPLIED${NC}"
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}  Services are enabled. You can now:${NC}"
+    echo -e "  ${GREEN}→${NC} Go to Option 2: Generate a new SSH key"
+    echo -e "  ${GREEN}→${NC} Go to Option 3: One-Click auto-upload to GitHub"
+    echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════${NC}"
+
+    log_action "SSH services started and enabled"
+    pause
+}
+
+# ==============================================================================
+# SSH MANAGER HUB (Orchestrator)
+# Consolidates all SSH-related tasks into one clean sub-menu.
+# ==============================================================================
+# ==============================================================================
+# SSH MANAGER HUB (Orchestrator)
+# ==============================================================================
+manage_ssh_menu() {
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}📡 SSH MANAGER (Keys, Services & GitHub Integration)${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} Install & Start SSH Service (Permanently Enable)"
+        echo -e "  ${GREEN}[2]${NC} Generate New SSH Key (ED25519) & Show Public Key"
+        echo -e "  ${GREEN}[3]${NC} 🔗 SSH GitHub Manager (Setup End-to-End, List, Test & Purge)"
+        echo -e "  ${GREEN}[0]${NC} Back to Module 1"
+        echo -e "\n===================================================================="
+        read -e -p "Select choice [0-3]: " SSH_CHOICE
+
+        case $SSH_CHOICE in
+            1)
+                install_and_start_ssh
+                ;;
+            2)
+                if [[ -f ~/.ssh/id_ed25519 ]]; then
+                    echo -e "\n${YELLOW}[!] SSH key already exists at ~/.ssh/id_ed25519${NC}"
+                else
+                    EMAIL=$(git config --global user.email || echo "user@github.com")
+                    ssh-keygen -t ed25519 -C "$EMAIL" -f ~/.ssh/id_ed25519 -N ""
+                    log_action "New SSH keypair generated"
+                    echo -e "${GREEN}[✔] New SSH key generated!${NC}"
+                fi
+                echo -e "\n${BOLD}─── PUBLIC KEY ───${NC}"
+                cat ~/.ssh/id_ed25519.pub
+                echo -e "${BOLD}─── END KEY ───${NC}"
+                pause
+                ;;
+            3)
+                manage_ssh_github_menu
+                ;;
+            0) break ;;
+            *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+# ==============================================================================
+# SSH GITHUB MANAGER (Sub-Hub)
+# Consolidates GitHub-specific SSH operations.
+# ==============================================================================
+# ==============================================================================
+# SSH GITHUB MANAGER (Sub-Hub)
+# ==============================================================================
+manage_ssh_github_menu() {
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}🔗 SSH GITHUB MANAGER${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} 🚀 SSH GitHub Setup End-to-End (Auto-generate + Auto-upload + Test)"
+        echo -e "  ${GREEN}[2]${NC} 🔑 Manage GitHub SSH Keys (Interactive TUI List & Purge)"
+        echo -e "  ${GREEN}[3]${NC} 🧪 Test SSH Connection to GitHub"
+        echo -e "  ${GREEN}[0]${NC} Back to SSH Manager"
+        echo -e "\n===================================================================="
+        read -e -p "Select choice [0-3]: " GH_SSH_CHOICE
+
+        case $GH_SSH_CHOICE in
+            1)
+                one_click_ssh_to_github
+                ;;
+            2)
+                manage_github_ssh_keys
+                ;;
+            3)
+                ssh -T git@github.com || true; pause
+                ;;
+            0) break ;;
+            *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# PERSONAL ACCESS TOKEN (PAT) VAULT MANAGER
+# Securely stores, views, and manages GitHub PATs locally since GitHub
+# only displays them once upon creation. Handles browser auto-open for creation.
+# ==============================================================================
+# ==============================================================================
+# VAULT SECURITY HELPERS
+# Handle password hashing, config loading/saving, and access prompts.
+# ==============================================================================
+_hash_pass() {
+    echo -n "$1" | sha256sum | awk '{print $1}'
+}
+
+_load_vault_config() {
+    VAULT_PASS_HASH=""
+    VAULT_LOCK_STATUS="unlocked"
+    if [[ -f "$VAULT_CONFIG" ]]; then
+        VAULT_PASS_HASH=$(grep '^PASS_HASH=' "$VAULT_CONFIG" 2>/dev/null | cut -d'=' -f2-)
+        VAULT_LOCK_STATUS=$(grep '^LOCK_STATUS=' "$VAULT_CONFIG" 2>/dev/null | cut -d'=' -f2-)
+        [[ -z "$VAULT_LOCK_STATUS" ]] && VAULT_LOCK_STATUS="unlocked"
+    fi
+}
+
+_save_vault_config() {
+    cat > "$VAULT_CONFIG" <<EOF
+PASS_HASH=${VAULT_PASS_HASH}
+LOCK_STATUS=${VAULT_LOCK_STATUS}
+EOF
+    chmod 600 "$VAULT_CONFIG" 2>/dev/null
+}
+
+_prompt_vault_access() {
+    _load_vault_config
+
+    # 1. If no password is set at all, force creation
+    if [[ -z "$VAULT_PASS_HASH" ]]; then
+        echo -e "${YELLOW}[i] First time using the vault. Please create a master password.${NC}"
+        echo -e "${CYAN}    (You can toggle the lock on/off later in Vault Security Settings)${NC}"
+        while true; do
+            read -s -p "    Create vault password: " p1
+            echo ""
+            read -s -p "    Confirm vault password: " p2
+            echo ""
+            if [[ "$p1" == "$p2" && -n "$p1" ]]; then
+                VAULT_PASS_HASH=$(_hash_pass "$p1")
+                VAULT_LOCK_STATUS="unlocked" # Defaults to unlocked for easy access
+                _save_vault_config
+                echo -e "${GREEN}[✔] Vault password created. Vault is UNLOCKED for easy access.${NC}"
+                return 0
+            else
+                echo -e "${RED}[!] Passwords did not match or were empty. Try again.${NC}"
+            fi
+        done
+    fi
+
+    # 2. If vault is unlocked, allow access without password
+    if [[ "$VAULT_LOCK_STATUS" == "unlocked" ]]; then
+        return 0
+    fi
+
+    # 3. If vault is locked, ask for password
+    if [[ "$VAULT_LOCK_STATUS" == "locked" ]]; then
+        echo -e "${YELLOW}[🔒] Vault is LOCKED. Enter master password to proceed.${NC}"
+        local attempts=3
+        while [[ $attempts -gt 0 ]]; do
+            read -s -p "    Password: " p_input
+            echo ""
+            if [[ "$(_hash_pass "$p_input")" == "$VAULT_PASS_HASH" ]]; then
+                echo -e "${GREEN}[✔] Access granted.${NC}"
+                return 0
+            else
+                attempts=$((attempts-1))
+                echo -e "${RED}[!] Incorrect password. ${attempts} attempts remaining.${NC}"
+            fi
+        done
+        echo -e "${RED}[!] Access denied. Returning to menu.${NC}"
+        sleep 2
+        return 1
+    fi
+
+    return 1
+}
+
+_manage_vault_security_settings() {
+    while true; do
+        show_header
+        _load_vault_config
+        echo -e "${YELLOW}${BOLD}🔐 VAULT SECURITY SETTINGS${NC}\n"
+
+        local status_color="$GREEN"
+        local status_text="UNLOCKED (No password required to view)"
+        if [[ "$VAULT_LOCK_STATUS" == "locked" ]]; then
+            status_color="$RED"
+            status_text="LOCKED (Password required to view)"
+        fi
+        if [[ -z "$VAULT_PASS_HASH" ]]; then
+            status_text="NOT INITIALIZED (No password set yet)"
+            status_color="$YELLOW"
+        fi
+
+        echo -e "  Current Status: ${status_color}${BOLD}${status_text}${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} Set / Change Vault Password"
+        echo -e "  ${GREEN}[2]${NC} Toggle Vault Lock (Currently: ${status_color}${VAULT_LOCK_STATUS^^}${NC}${GREEN})${NC}"
+        echo -e "  ${GREEN}[0]${NC} Back to Vault"
+        echo -e "\n===================================================================="
+        read -e -p "Select choice [0-2]: " SEC_CHOICE
+
+        case $SEC_CHOICE in
+            1)
+                echo -e "\n${CYAN}Setting new vault password...${NC}"
+                while true; do
+                    read -s -p "    Enter NEW vault password: " p1
+                    echo ""
+                    read -s -p "    Confirm NEW vault password: " p2
+                    echo ""
+                    if [[ "$p1" == "$p2" && -n "$p1" ]]; then
+                        VAULT_PASS_HASH=$(_hash_pass "$p1")
+                        [[ -z "$VAULT_LOCK_STATUS" ]] && VAULT_LOCK_STATUS="unlocked"
+                        _save_vault_config
+                        echo -e "${GREEN}[✔] Vault password changed successfully!${NC}"
+                        log_action "Vault password changed"
+                        sleep 1
+                        break
+                    else
+                        echo -e "${RED}[!] Passwords did not match or were empty.${NC}"
+                    fi
+                done
+                pause
+                ;;
+            2)
+                if [[ -z "$VAULT_PASS_HASH" ]]; then
+                    echo -e "\n${RED}[!] Please set a password first (Option 1).${NC}"
+                    pause
+                    continue
+                fi
+                if [[ "$VAULT_LOCK_STATUS" == "unlocked" ]]; then
+                    echo -e "\n${YELLOW}[i] Locking the vault will require a password to view/save/delete tokens.${NC}"
+                    read -e -p "    Lock the vault now? (y/N): " DO_LOCK
+                    if [[ "$DO_LOCK" =~ ^[Yy]$ ]]; then
+                        VAULT_LOCK_STATUS="locked"
+                        _save_vault_config
+                        echo -e "${RED}[✔] Vault is now LOCKED.${NC}"
+                        log_action "Vault locked"
+                    fi
+                else
+                    echo -e "\n${CYAN}[i] Unlocking the vault will allow access WITHOUT a password.${NC}"
+                    read -e -p "    Unlock the vault now? (y/N): " DO_UNLOCK
+                    if [[ "$DO_UNLOCK" =~ ^[Yy]$ ]]; then
+                        VAULT_LOCK_STATUS="unlocked"
+                        _save_vault_config
+                        echo -e "${GREEN}[✔] Vault is now UNLOCKED.${NC}"
+                        log_action "Vault unlocked"
+                    fi
+                fi
+                pause
+                ;;
+            0) break ;;
+            *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# PERSONAL ACCESS TOKEN (PAT) VAULT MANAGER
+# ==============================================================================
+manage_pat_vault() {
+    # Declare without 'local' so helper functions above can access them
+    VAULT_FILE="${CONFIG_DIR}/pat_vault.env"
+    VAULT_CONFIG="${CONFIG_DIR}/.vault_config"
+
+    touch "$VAULT_FILE" 2>/dev/null
+    chmod 600 "$VAULT_FILE" 2>/dev/null
+    touch "$VAULT_CONFIG" 2>/dev/null
+    chmod 600 "$VAULT_CONFIG" 2>/dev/null
+
+    while true; do
+        show_header
+        _load_vault_config
+
+        local lock_icon="🔓"
+        if [[ "$VAULT_LOCK_STATUS" == "locked" ]]; then lock_icon="🔒"; fi
+
+        echo -e "${YELLOW}${BOLD}🔑 PERSONAL ACCESS TOKEN (PAT) VAULT ${lock_icon}${NC}\n"
+        echo -e "${CYAN}GitHub only shows a PAT once. This vault securely stores it for reuse.${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} 🌐 Create New Token (Opens browser + Save to Vault)"
+        echo -e "  ${GREEN}[2]${NC} 📋 View Saved Tokens"
+        echo -e "  ${RED}[3]${NC} 🗑️  Delete a Saved Token"
+        echo -e "  ${CYAN}[4]${NC} 🔐 Vault Security Settings (Password & Lock Toggle)"
+        echo -e "  ${GREEN}[0]${NC} Back to SSH Manager"
+        echo -e "\n===================================================================="
+        read -e -p "Select choice [0-4]: " PAT_CHOICE
+
+        case $PAT_CHOICE in
+            1)
+                if ! _prompt_vault_access; then continue; fi
+
+                echo -e "\n${CYAN}What type of token do you want to create?${NC}\n"
+                echo -e "  ${GREEN}[1]${NC} Fine-grained token (Recommended - restrict to specific repos)"
+                echo -e "  ${GREEN}[2]${NC} Classic token (Legacy - global account access)"
+                echo -e "  ${GREEN}[0]${NC} Cancel"
+                read -e -p "Select [0-2]: " TOKEN_TYPE
+
+                local token_url=""
+                case $TOKEN_TYPE in
+                    1) token_url="https://github.com/settings/personal-access-tokens/new" ;;
+                    2) token_url="https://github.com/settings/tokens/new" ;;
+                    *) continue ;;
+                esac
+
+                echo -e "\n${GREEN}[✔] Attempting to open your browser to GitHub...${NC}"
+                echo -e "${YELLOW}[i] If your browser didn't open (e.g., headless server/SSH), copy the URL below.${NC}"
+                echo -e "${YELLOW}[i] Complete the creation in your browser (tick your desired boxes).${NC}"
+                echo -e "${YELLOW}[i] Copy the generated token (starts with github_pat_ or ghp_).${NC}\n"
+
+                echo -e "${CYAN}${BOLD}──────────── GITHUB URL ────────────${NC}"
+                echo -e "${GREEN}${token_url}${NC}"
+                echo -e "${CYAN}${BOLD}────────────────────────────────────${NC}\n"
+
+                if command -v xdg-open &>/dev/null; then
+                    xdg-open "$token_url" 2>/dev/null &
+                elif command -v open &>/dev/null; then
+                    open "$token_url" 2>/dev/null &
+                fi
+
+                read -e -p "Paste your new token here (or press ENTER to cancel): " NEW_TOKEN
+
+                if [[ -z "$NEW_TOKEN" ]]; then
+                    echo -e "${YELLOW}[i] Cancelled.${NC}"
+                    pause
+                    continue
+                fi
+
+                if [[ ! "$NEW_TOKEN" =~ ^(ghp_|github_pat_) ]]; then
+                    echo -e "${RED}[!] Invalid token format. Tokens must start with 'ghp_' or 'github_pat_'.${NC}"
+                    pause
+                    continue
+                fi
+
+                echo ""
+                read -e -p "Enter a name/alias for this token (e.g., 'Jenkins-Kali-Server'): " TOKEN_ALIAS
+                if [[ -z "$TOKEN_ALIAS" ]]; then
+                    TOKEN_ALIAS="token-$(date '+%Y%m%d-%H%M%S')"
+                fi
+
+                if grep -q "^${TOKEN_ALIAS}=" "$VAULT_FILE" 2>/dev/null; then
+                    echo -e "${RED}[!] A token with this alias already exists. Please use a different name.${NC}"
+                    pause
+                    continue
+                fi
+
+                echo "${TOKEN_ALIAS}=${NEW_TOKEN}" >> "$VAULT_FILE"
+                chmod 600 "$VAULT_FILE"
+
+                echo -e "\n${GREEN}${BOLD}[✔] Token securely saved to vault as '${TOKEN_ALIAS}'!${NC}"
+                log_action "Saved new PAT to vault: ${TOKEN_ALIAS}"
+                pause
+                ;;
+
+            2)
+                if ! _prompt_vault_access; then continue; fi
+
+                echo -e "\n${CYAN}═══════════════════════════════════════════════════${NC}"
+                echo -e "${BOLD}              SAVED PERSONAL ACCESS TOKENS${NC}"
+                echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
+
+                if [[ ! -s "$VAULT_FILE" ]]; then
+                    echo -e "${YELLOW}[i] Vault is empty. Create a token first (Option 1).${NC}"
+                else
+                    local idx=1
+                    while IFS='=' read -r alias token; do
+                        [[ -z "$alias" ]] && continue
+                        printf "  ${GREEN}[%d]${NC} ${BOLD}%-25s${NC}\n" "$idx" "$alias"
+                        echo -e "      ${CYAN}Token: ${GREEN}${token}${NC}\n"
+                        idx=$((idx+1))
+                    done < "$VAULT_FILE"
+                fi
+                pause
+                ;;
+
+            3)
+                if ! _prompt_vault_access; then continue; fi
+
+                if [[ ! -s "$VAULT_FILE" ]]; then
+                    echo -e "\n${YELLOW}[i] Vault is empty. Nothing to delete.${NC}"
+                    pause
+                    continue
+                fi
+
+                echo -e "\n${RED}${BOLD}SELECT A TOKEN TO DELETE:${NC}\n"
+                local idx=1
+                while IFS='=' read -r alias token; do
+                    [[ -z "$alias" ]] && continue
+                    printf "  ${RED}[%d]${NC} ${BOLD}%-25s${NC}\n" "$idx" "$alias"
+                    idx=$((idx+1))
+                done < "$VAULT_FILE"
+
+                echo ""
+                read -e -p "Enter token number to delete (or ENTER to cancel): " DEL_NUM
+
+                if [[ -n "$DEL_NUM" ]]; then
+                    local current_idx=1
+                    local temp_file=$(mktemp)
+                    local deleted_alias=""
+                    local deleted_token=""
+
+                    while IFS='=' read -r alias token; do
+                        if [[ "$current_idx" -ne "$DEL_NUM" ]]; then
+                            echo "${alias}=${token}" >> "$temp_file"
+                        else
+                            deleted_alias="$alias"
+                            deleted_token="$token"
+                        fi
+                        current_idx=$((current_idx+1))
+                    done < "$VAULT_FILE"
+
+                    echo ""
+                    echo -e "${YELLOW}[?] How do you want to delete '${deleted_alias}'?${NC}"
+                    echo -e "  ${GREEN}[L]${NC} Local vault only (Token stays active on GitHub)"
+                    echo -e "  ${RED}[B]${NC} Both Local + GitHub (Revoke from GitHub account)"
+                    read -e -p "    Choose [L/B] (Default: L): " DEL_SCOPE
+
+                    if [[ "$DEL_SCOPE" =~ ^[Bb]$ ]]; then
+                        echo -e "\n${CYAN}--> Searching GitHub for a token named '${deleted_alias}'...${NC}"
+
+                        # GH_PAGER=cat prevents the blank 'less' pager screen on errors
+                        local gh_token_id
+                        gh_token_id=$(GH_PAGER=cat gh api user/personal-access-tokens --jq ".[] | select(.name == \"${deleted_alias}\") | .id" 2>/dev/null)
+
+                        if [[ -n "$gh_token_id" ]]; then
+                            echo -e "${CYAN}--> Found on GitHub (ID: ${gh_token_id}). Revoking...${NC}"
+                            if GH_PAGER=cat gh api -X DELETE "user/personal-access-tokens/${gh_token_id}" 2>/dev/null; then
+                                echo -e "${GREEN}[✔] Successfully revoked from GitHub!${NC}"
+                                log_action "Revoked GitHub token: ${deleted_alias} (ID: ${gh_token_id})"
+                            else
+                                echo -e "${RED}[!] API failed to revoke. Opening browser to do it manually...${NC}"
+                                xdg-open "https://github.com/settings/personal-access-tokens" 2>/dev/null &
+                            fi
+                        else
+                            echo -e "${YELLOW}[i] Could not auto-find '${deleted_alias}' on GitHub.${NC}"
+                            echo -e "${CYAN}    (This usually means it's a Classic token, or named differently on GitHub).${NC}"
+                            echo -e "${RED}    ⚠️  OPENING BROWSER TO REVOKE MANUALLY...${NC}"
+                        fi
+
+                        # ALWAYS print the manual URLs so headless/SSH users aren't left stranded
+                        echo -e "\n${CYAN}${BOLD}──────── MANUAL REVOKE URLS ────────${NC}"
+                        echo -e "${GREEN}    Fine-Grained Tokens: https://github.com/settings/personal-access-tokens${NC}"
+                        echo -e "${GREEN}    Classic Tokens:      https://github.com/settings/tokens${NC}"
+                        echo -e "${CYAN}${BOLD}─────────────────────────────────────${NC}\n"
+
+                        # Try to open the browser automatically to the most likely page (Fine-grained)
+                        if command -v xdg-open &>/dev/null; then
+                            xdg-open "https://github.com/settings/personal-access-tokens" 2>/dev/null &
+                        elif command -v open &>/dev/null; then
+                            open "https://github.com/settings/personal-access-tokens" 2>/dev/null &
+                        fi
+                        echo ""
+                    fi
+
+                    # Remove from local vault
+                    mv "$temp_file" "$VAULT_FILE"
+                    chmod 600 "$VAULT_FILE"
+                    echo -e "${GREEN}[✔] Removed '${deleted_alias}' from local vault.${NC}"
+                    log_action "Deleted PAT from local vault: ${deleted_alias}"
+                fi
+                pause
+                ;;
+
+            4)
+                # SECURITY FIX: Ask for vault password before allowing access to security settings
+                if ! _prompt_vault_access; then continue; fi
+
+                _manage_vault_security_settings
+                ;;
+
+            0) break ;;
+            *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+# ==============================================================================
+# MODULE 1: Identity & Remote URL Manager
 # ==============================================================================
 manage_identity() {
     while true; do
         show_header
-        echo -e "${YELLOW}${BOLD}[+] Module 1: Identity, SSH & Remote URL Manager${NC}\n"
+        echo -e "${YELLOW}${BOLD}[+] Module 1: Identity & Remote URL Manager${NC}\n"
         echo -e "  ${GREEN}[1]${NC} Check / Set Global Git User & Email"
-        echo -e "  ${GREEN}[2]${NC} Generate New SSH Key (ED25519) & Show Public Key"
-        echo -e "  ${GREEN}[3]${NC} Test SSH Connection to GitHub"
+        echo -e "  ${GREEN}[2]${NC} 📡 SSH Manager (Keys, Services & GitHub Integration)"
+        echo -e "  ${GREEN}[3]${NC} 🔑 Personal Access Token (PAT) Vault Manager"
         echo -e "  ${GREEN}[4]${NC} Inspect & Manage Remote Repository URLs"
         echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
@@ -1535,17 +2581,11 @@ manage_identity() {
                 pause
                 ;;
             2)
-                if [[ -f ~/.ssh/id_ed25519 ]]; then
-                    echo -e "\n${YELLOW}[!] SSH key already exists.${NC}"
-                else
-                    EMAIL=$(git config --global user.email || echo "user@github.com")
-                    ssh-keygen -t ed25519 -C "$EMAIL" -f ~/.ssh/id_ed25519 -N ""
-                    log_action "New SSH keypair generated"
-                fi
-                cat ~/.ssh/id_ed25519.pub
-                pause
+                manage_ssh_menu
                 ;;
-            3) ssh -T git@github.com || true; pause ;;
+            3)
+                manage_pat_vault
+                ;;
             4)
                 while true; do
                     show_header
@@ -1583,7 +2623,6 @@ manage_identity() {
         esac
     done
 }
-
 # ==============================================================================
 # MODULE 2: Repository Setup, Status & Reset Engine
 # ==============================================================================

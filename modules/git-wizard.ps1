@@ -15,23 +15,32 @@
 $env:GIT_PAGER = "cat"
 
 # ==============================================================================
-# TERMINAL HYGIENE — alternate screen buffer + guaranteed restoration
+# TERMINAL HYGIENE — scrollback clearing + guaranteed cursor restoration
 # ------------------------------------------------------------------------------
-# Same fix as the Linux side. Without this, every menu redraw (Clear-Host)
-# just scrolls the old frame up into the user's terminal history — over a
-# long session, scrolling up shows dozens of stacked duplicate menus.
-# Modern Windows Terminal / PowerShell 5.1+ on Windows 10 1511+ understand
-# the same VT100 alternate-screen sequences as Linux terminals do. Older
-# legacy conhost windows may not — everything is wrapped in try/catch so
-# it degrades harmlessly to normal Clear-Host behavior there instead of
-# throwing errors.
+# NOTE (V2.2): earlier versions tried using the true alternate screen buffer
+# (ESC[?1049h/l), matching the Linux side. On Windows this turned out to
+# conflict with Write-Host -ForegroundColor: once an app takes manual VT
+# control of the screen via the alt-buffer, ConPTY/Windows Terminal stops
+# reliably forwarding the legacy SetConsoleTextAttribute-based color calls
+# into it, so everything rendered in default white/gray. The alt-buffer
+# approach and this script's coloring model don't mix reliably on Windows,
+# so it's dropped. Instead: Clear-Host (as before) + ESC[3J to also wipe
+# the terminal's scrollback history, without ever leaving the main buffer —
+# this keeps legacy color rendering intact while still stopping old menu
+# frames from stacking up when you scroll back.
 # ==============================================================================
+$Global:ESC = [char]27   # Use [char]27 instead of `e — `e is only recognized in PowerShell 6+ (pwsh.exe).
+                         # On Windows PowerShell 5.1 (powershell.exe), `e is dropped and prints as literal text.
+
 function Enter-AltScreen {
-    try { [Console]::Out.Write("`e[?1049h`e[H") } catch { }
+    # Kept for compatibility with existing calls elsewhere in the script.
+    # No longer switches buffers — see note above. Just clears scrollback.
+    try { [Console]::Out.Write("$ESC[3J") } catch { }
+    Clear-Host
 }
 function Restore-Terminal {
-    try { [Console]::Out.Write("`e[?1049l") } catch { }
     try { [Console]::CursorVisible = $true } catch { }
+    try { [Console]::ResetColor() } catch { }
 }
 
 Enter-AltScreen
