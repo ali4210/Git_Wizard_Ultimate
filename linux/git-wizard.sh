@@ -1032,6 +1032,44 @@ get_sync_status() {
     echo -e "$line"
 }
 
+disable_precommit_hooks() {
+    show_header
+    echo -e "${YELLOW}${BOLD}🪝 DISABLE PRE-COMMIT HOOKS${NC}\n"
+
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        echo -e "${RED}[!] Not inside a Git repository. cd into one first.${NC}"
+        pause
+        return
+    fi
+
+    if [[ -f ".git/hooks/pre-commit" ]]; then
+        rm -f ".git/hooks/pre-commit"
+        echo -e "${GREEN}[✔] Pre-commit hook disabled for this repo.${NC}"
+        echo -e "${CYAN}    (Your .pre-commit-config.yaml is left untouched — re-enable anytime.)${NC}"
+        log_action "pre-commit hooks disabled for ${TARGET_REPO_DIR}"
+    else
+        echo -e "${YELLOW}[i] No active pre-commit hook found for this repo.${NC}"
+    fi
+    pause
+}
+
+repo_precommit_hook_menu() {
+    while true; do
+        show_header
+        echo -e "${YELLOW}${BOLD}🪝 REPOSITORY PRE-COMMIT HOOK${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} Enable Pre-Commit Hook for This Repo"
+        echo -e "  ${RED}[2]${NC} Disable Pre-Commit Hook for This Repo"
+        echo -e "  ${GREEN}[0]${NC} Back"
+        echo -e "\n===================================================================="
+        read -e -p "Select choice [0-2]: " PC_CHOICE
+        case $PC_CHOICE in
+            1) setup_precommit_hooks ;;
+            2) disable_precommit_hooks ;;
+            0) break ;;
+        esac
+    done
+}
+
 show_header() {
     clear
     IMAGE_PATH="${SCRIPT_DIR}/assets/octocat.png"
@@ -2112,11 +2150,11 @@ install_and_start_ssh() {
     fi
 
     echo -e "\n${GREEN}${BOLD}═══════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}${BOLD}  ✅ SSH MANAGER END-TO-END APPLIED${NC}"
+    echo -e "${GREEN}${BOLD}  ✅ SSH SETUP COMPLETE FOR THIS SYSTEM${NC}"
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════${NC}"
     echo -e "${CYAN}  Services are enabled. You can now:${NC}"
-    echo -e "  ${GREEN}→${NC} Go to Option 2: Generate a new SSH key"
-    echo -e "  ${GREEN}→${NC} Go to Option 3: One-Click auto-upload to GitHub"
+    echo -e "  ${GREEN}→${NC} Go to option 2 for generating a new Public SSH key and apply that SSH key to your GitHub account manually."
+    echo -e "  ${GREEN}→${NC} Go to option number 3: One-click end-to-end SSH setup from system to GitHub with Autonomous Pipeline"
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════${NC}"
 
     log_action "SSH services started and enabled"
@@ -2671,9 +2709,11 @@ manage_repo() {
         echo -e "  ${GREEN}[7]${NC} Generate Tailored .gitignore File"
         echo -e "  ${GREEN}[8]${NC} Repo History Viewer"
         echo -e "      ${CYAN}Shows commit graph across all branches (uses 'delta' for prettier diffs if installed).${NC}"
+        echo -e "  ${GREEN}[9]${NC} Repository Pre-Commit Hook"
+        echo -e "      ${CYAN}Enable or disable pre-commit hooks for this repo.${NC}"
         echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
-        read -e -p "Select choice [0-8]: " REPO_CHOICE
+        read -e -p "Select choice [0-9]: " REPO_CHOICE
 
         case $REPO_CHOICE in
             1) one_click_repo_setup ;;
@@ -2797,6 +2837,7 @@ manage_repo() {
                 pause
                 ;;
             8) repo_history_viewer ;;
+            9) repo_precommit_hook_menu ;;
             0) break ;;
         esac
     done
@@ -5209,11 +5250,10 @@ while true; do
                 echo -e "  ${GREEN}[7]${NC} Create git-wizard Checkpoint Now (manual backup point)"
                 echo -e "  ${GREEN}[8]${NC} Update git-wizard Now"
                 echo -e "  ${GREEN}[9]${NC} Rollback git-wizard to Previous Version"
-                echo -e "  ${GREEN}[10]${NC} Setup Pre-Commit Hooks for THIS repo"
-                echo -e "  ${GREEN}[11]${NC} Enable Universal Global CLI Permanently (current: ${GLOBAL_CLI_ENABLED})"
-                echo -e "  ${GREEN}[12]${NC} Disable Universal Global CLI Permanently"
+                echo -e "  ${GREEN}[10]${NC} Enable Universal Global CLI Permanently (current: ${GLOBAL_CLI_ENABLED})"
+                echo -e "  ${GREEN}[11]${NC} Disable Universal Global CLI Permanently"
                 echo -e "  ${GREEN}[0]${NC} Back"
-                read -e -p "Select choice [0-12]: " S_CHOICE
+                read -e -p "Select choice [0-11]: " S_CHOICE
                 case $S_CHOICE in
                     1) select_wizard_mode ;;
                     2) select_dry_run_state ;;
@@ -5224,9 +5264,8 @@ while true; do
                     7) create_tool_checkpoint ;;
                     8) update_git_wizard ;;
                     9) rollback_git_wizard ;;
-                    10) setup_precommit_hooks ;;
-                    11) enable_global_cli ;;
-                    12) disable_global_cli ;;
+                    10) enable_global_cli ;;
+                    11) disable_global_cli ;;
                     0) break ;;
                 esac
             done

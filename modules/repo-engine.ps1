@@ -18,10 +18,11 @@ function Manage-Repo {
         Write-Host "  [5] Interactive Git Reset and Undo Utility" -ForegroundColor Green
         Write-Host "  [6] Smart Conflict Push Resolver" -ForegroundColor Green
         Write-Host "  [7] Generate Tailored .gitignore File" -ForegroundColor Green
+        Write-Host "  [8] Repository Pre-Commit Hook" -ForegroundColor Green
         Write-Host "  [0] Back to Main Menu" -ForegroundColor Green
         Write-Host "`n====================================================================" -ForegroundColor Cyan
 
-        $choice = Read-Host "Select choice [0-7]"
+        $choice = Read-Host "Select choice [0-8]"
 
         switch ($choice) {
             "1" { Invoke-OneClickRepoSetup }
@@ -179,8 +180,62 @@ function Manage-Repo {
                 }
                 Pause-Console
             }
+            "8" { Show-RepoPrecommitHookMenu }
             "0" { return }
             default { Write-Host "Invalid selection!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
+        }
+    }
+}
+
+# ==============================================================================
+# REPOSITORY PRE-COMMIT HOOK — Enable / Disable (moved here from Tool Stack
+# Manager). Install-PrecommitHooks itself still lives in toolstack-engine.ps1.
+# ==============================================================================
+function Disable-PrecommitHooks {
+    Show-Header
+    Write-Host "DISABLE PRE-COMMIT HOOKS`n" -ForegroundColor Yellow
+
+    $isRepo = git rev-parse --is-inside-work-tree 2>$null
+    if ($isRepo -ne "true") {
+        Write-Host "[!] Not inside a Git repository. cd into one first." -ForegroundColor Red
+        Pause-Console
+        return
+    }
+
+    $hookPath = Join-Path (Get-Location) ".git\hooks\pre-commit"
+    if (Test-Path $hookPath) {
+        Remove-Item -Path $hookPath -Force
+        Write-Host "[+] Pre-commit hook disabled for this repo." -ForegroundColor Green
+        Write-Host "    (.pre-commit-config.yaml is left untouched - re-enable anytime.)" -ForegroundColor Cyan
+        if (Get-Command Write-WizardActionLog -ErrorAction SilentlyContinue) {
+            Write-WizardActionLog "pre-commit hooks disabled for $(Get-Location)"
+        }
+    } else {
+        Write-Host "[i] No active pre-commit hook found for this repo." -ForegroundColor Yellow
+    }
+    Pause-Console
+}
+
+function Show-RepoPrecommitHookMenu {
+    while ($true) {
+        Show-Header
+        Write-Host "REPOSITORY PRE-COMMIT HOOK`n" -ForegroundColor Yellow
+        Write-Host "  [1] Enable Pre-Commit Hook for This Repo" -ForegroundColor Green
+        Write-Host "  [2] Disable Pre-Commit Hook for This Repo" -ForegroundColor Red
+        Write-Host "  [0] Back" -ForegroundColor Green
+        Write-Host "`n===================================================================="
+        $c = Read-Host "Select choice [0-2]"
+        switch ($c) {
+            "1" {
+                if (Get-Command Install-PrecommitHooks -ErrorAction SilentlyContinue) {
+                    Install-PrecommitHooks
+                } else {
+                    Write-Host "[!] toolstack-engine.ps1 not loaded - Install-PrecommitHooks unavailable." -ForegroundColor Red
+                    Pause-Console
+                }
+            }
+            "2" { Disable-PrecommitHooks }
+            "0" { return }
         }
     }
 }

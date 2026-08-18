@@ -395,16 +395,14 @@ function Show-ToolStackManagerMenu {
         Write-Host "  [2] Check Tool Stack Versions" -ForegroundColor Green
         Write-Host "  [3] Check for Tool Updates (winget)" -ForegroundColor Green
         Write-Host "  [4] Bonus Tools (lazygit)" -ForegroundColor Green
-        Write-Host "  [5] Setup Pre-Commit Hooks for THIS repo" -ForegroundColor Green
         Write-Host "  [0] Back to Main Menu" -ForegroundColor Green
         Write-Host "`n===================================================================="
-        $c = Read-Host "Select choice [0-5]"
+        $c = Read-Host "Select choice [0-4]"
         switch ($c) {
             "1" { Test-OptionalToolsFull }
             "2" { Show-ToolStackVersions }
             "3" { Show-ToolStackUpdates }
             "4" { Show-BonusToolsMenu }
-            "5" { Install-PrecommitHooks }
             "0" { return }
         }
     }
