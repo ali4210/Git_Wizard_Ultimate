@@ -284,7 +284,151 @@ detect_pkg_manager() {
     else echo "unknown"
     fi
 }
+# ==============================================================================
+# ENSURE GIT ITSELF IS INSTALLED (bootstrap — must run before anything else
+# touches the 'git' command).
+#   Linux fast path:  native package manager (apt/dnf/pacman) — seconds.
+#   macOS fast path:  Apple's Command Line Tools (xcode-select --install) —
+#                      this is what actually ships git on stock Macs, and is
+#                      lighter than pulling all of Homebrew just for git.
+#   Universal fallback (Linux AND macOS): Homebrew — no sudo required.
+# ==============================================================================
+ensure_git_installed() {
+    if command -v git &>/dev/null; then
+        return 0
+    fi
 
+    echo -e "${YELLOW}[i] 'git' is not installed on this system — installing automatically...${NC}"
+
+    local os
+    os=$(uname -s)
+
+    # --------------------------------------------------------------------
+    # macOS (Darwin) — try Apple's own Command Line Tools FIRST.
+    # --------------------------------------------------------------------
+    if [[ "$os" == "Darwin" ]]; then
+        echo -e "${CYAN}[i] macOS detected. Apple's Command Line Tools include git and are the${NC}"
+        echo -e "${CYAN}    lightest official way to get it (no full Homebrew needed).${NC}\n"
+
+        if xcode-select -p &>/dev/null; then
+            # CLT path exists but git still isn't on PATH — unusual, but
+            # handle it rather than assume. Re-trigger install to repair.
+            echo -e "${YELLOW}[i] Command Line Tools appear to be present but 'git' wasn't found.${NC}"
+            echo -e "${CYAN}    Attempting to repair the CLT install...${NC}"
+        fi
+
+        echo -e "${YELLOW}${BOLD}[!] A native macOS dialog is about to appear.${NC}"
+        echo -e "${YELLOW}    Click \"Install\" on it (this is Apple's own installer, not git-wizard's —${NC}"
+        echo -e "${YELLOW}    there is no way to script around this specific first-time prompt).${NC}\n"
+
+        xcode-select --install 2>/dev/null
+
+        echo -e "${CYAN}--> Waiting for Command Line Tools installation to complete...${NC}"
+        echo -e "${CYAN}    (This runs in its own window. Come back here once it finishes.)${NC}\n"
+
+        # Poll rather than block forever — xcode-select --install itself
+        # returns almost immediately (it just launches the GUI installer),
+        # so we watch for `git` to actually appear rather than trusting a
+        # fixed sleep. Capped at ~10 minutes to avoid hanging indefinitely
+        # if the user closes the dialog without installing.
+        local waited=0
+        local max_wait=600
+        while ! command -v git &>/dev/null && [[ $waited -lt $max_wait ]]; do
+            sleep 5
+            waited=$((waited + 5))
+            if (( waited % 30 == 0 )); then
+                echo -e "${CYAN}    ...still waiting (${waited}s elapsed, up to ${max_wait}s)${NC}"
+            fi
+        done
+
+        if command -v git &>/dev/null; then
+            echo -e "${GREEN}[✔] git installed successfully via Command Line Tools.${NC}"
+            log_action "Bootstrapped git via macOS Command Line Tools"
+            return 0
+        fi
+
+        echo -e "${YELLOW}[i] Command Line Tools install didn't complete (timed out or was cancelled).${NC}"
+        echo -e "${CYAN}--> Falling back to Homebrew...${NC}"
+        # falls through to the shared Homebrew fallback below
+    fi
+
+    # --------------------------------------------------------------------
+    # Linux — native package manager fast path.
+    # --------------------------------------------------------------------
+    if [[ "$os" != "Darwin" ]]; then
+        local pm
+        pm=$(detect_pkg_manager)
+        case "$pm" in
+            apt)
+                echo -e "${CYAN}--> Running: sudo apt update && sudo apt install -y git${NC}"
+                sudo apt update && sudo apt install -y git
+                ;;
+            dnf)
+                echo -e "${CYAN}--> Running: sudo dnf install -y git${NC}"
+                sudo dnf install -y git
+                ;;
+            pacman)
+                echo -e "${CYAN}--> Running: sudo pacman -Sy --noconfirm git${NC}"
+                sudo pacman -Sy --noconfirm git
+                ;;
+            brew)
+                echo -e "${CYAN}--> Running: brew install git${NC}"
+                brew install git
+                ;;
+            *)
+                echo -e "${YELLOW}[i] No supported native package manager detected.${NC}"
+                ;;
+        esac
+
+        if command -v git &>/dev/null; then
+            echo -e "${GREEN}[✔] git installed successfully via ${pm}.${NC}"
+            return 0
+        fi
+        echo -e "${YELLOW}[i] Native package manager install failed or unavailable.${NC}"
+        echo -e "${CYAN}--> Falling back to Homebrew (works on Linux too, no sudo required)...${NC}"
+    fi
+
+    # --------------------------------------------------------------------
+    # Shared fallback for BOTH platforms: Homebrew.
+    # --------------------------------------------------------------------
+    if ! command -v brew &>/dev/null; then
+        echo -e "${CYAN}    Installing Homebrew first...${NC}"
+        NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+        # Surface brew into THIS session immediately regardless of platform
+        # or CPU architecture — covers Apple Silicon, Intel Mac, and Linux.
+        if [[ -d "/opt/homebrew/bin" ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"                      # Apple Silicon Mac
+        elif [[ -d "/usr/local/bin" ]] && [[ -x "/usr/local/bin/brew" ]]; then
+            eval "$(/usr/local/bin/brew shellenv)"                        # Intel Mac
+        elif [[ -d "/home/linuxbrew/.linuxbrew/bin" ]]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"        # Linux
+        elif [[ -d "${HOME}/.linuxbrew/bin" ]]; then
+            eval "$(${HOME}/.linuxbrew/bin/brew shellenv)"                # Linux (user-local)
+        fi
+    fi
+
+    if command -v brew &>/dev/null; then
+        brew install git
+        hash -r 2>/dev/null || true
+    fi
+
+    if command -v git &>/dev/null; then
+        echo -e "${GREEN}[✔] git installed successfully via Homebrew fallback.${NC}"
+        log_action "Bootstrapped git via Homebrew fallback"
+        return 0
+    fi
+
+    echo -e "${RED}[!] Could not install git automatically through any method.${NC}"
+    if [[ "$os" == "Darwin" ]]; then
+        echo -e "${YELLOW}    Please finish the Command Line Tools install manually (Apple menu ->${NC}"
+        echo -e "${YELLOW}    check for a pending install dialog), or install Homebrew yourself from${NC}"
+        echo -e "${YELLOW}    https://brew.sh, then re-run git-wizard.${NC}"
+    else
+        echo -e "${YELLOW}    Please install git manually for your distro, then re-run git-wizard.${NC}"
+    fi
+    return 1
+}
 # Package names differ per manager for some tools (e.g. delta -> git-delta, gh -> github-cli on Arch)
 get_package_name() {
     local tool="$1" pm="$2"
@@ -316,9 +460,9 @@ get_install_command() {
     local pkg
     pkg=$(get_package_name "$tool" "$pm")
     case "$pm" in
-        apt)    echo "sudo apt install -y ${pkg}" ;;
+        apt)    echo "sudo apt update && sudo apt install -y ${pkg}" ;;
         dnf)    echo "sudo dnf install -y ${pkg}" ;;
-        pacman) echo "sudo pacman -S --noconfirm ${pkg}" ;;
+        pacman) echo "sudo pacman -Sy --noconfirm ${pkg}" ;;
         brew)   echo "brew install ${pkg}" ;;
         *)      echo "" ;;
     esac
@@ -369,7 +513,26 @@ offer_install() {
 
     # Fallback path: pull a prebuilt binary directly from the tool's GitHub releases.
     case "$tool" in
-        gh|delta|glab|git-absorb|ghq)
+        gh|delta|glab|git-absorb|ghq|jq)
+            read -e -p "      Try pulling a prebuilt binary from GitHub releases instead? (y/N): " DOBINARY
+            if [[ "$DOBINARY" =~ ^[Yy]$ ]]; then
+                install_from_binary "$tool"
+            else
+                echo -e "  ${YELLOW}[i] Skipped. Install '${tool}' manually anytime.${NC}"
+            fi
+            ;;
+        chafa)
+            echo -e "  ${YELLOW}[i] chafa doesn't publish static binaries — it's source-tarball-only upstream.${NC}"
+            if command -v snap &>/dev/null; then
+                read -e -p "      Try installing via snap instead? (y/N): " DOSNAP
+                if [[ "$DOSNAP" =~ ^[Yy]$ ]]; then
+                    sudo snap install chafa && echo -e "  ${GREEN}[✔] chafa installed via snap.${NC}" || echo -e "  ${RED}[!] snap install failed.${NC}"
+                fi
+            else
+                echo -e "  ${CYAN}    No snap available either — build from source: https://github.com/hpjansson/chafa/releases${NC}"
+            fi
+            ;;
+        lazygit|act)
             read -e -p "      Try pulling a prebuilt binary from GitHub releases instead? (y/N): " DOBINARY
             if [[ "$DOBINARY" =~ ^[Yy]$ ]]; then
                 install_from_binary "$tool"
@@ -424,164 +587,172 @@ fetch_latest_release_tag() {
     echo "$tag"
 }
 
+# ==============================================================================
+# SHARED BINARY FETCHER — used by install_from_binary() for every tool, on
+# both Linux and macOS. Handles raw-binary downloads, .tar.gz, and .zip
+# uniformly so each tool's case block only has to supply a URL + filenames.
+# ==============================================================================
+_gw_fetch_and_install_binary() {
+    # $1=install_dir $2=url $3=archive_type(tar|zip|raw) $4=find_name $5=install_as $6=log_label
+    local install_dir="$1" url="$2" atype="$3" findname="$4" installas="$5" label="$6"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
+
+    if [[ "$atype" == "raw" ]]; then
+        if curl -fsSL --max-time 60 "$url" -o "${install_dir}/${installas}"; then
+            chmod +x "${install_dir}/${installas}"
+            echo -e "  ${GREEN}[✔] ${installas} installed to ${install_dir}/${installas}${NC}"
+            log_action "Installed ${label} via binary pull"
+            rm -rf "$tmpdir"; return 0
+        else
+            echo -e "  ${RED}[!] Download failed. Check your connection or try the repository/brew install instead.${NC}"
+            rm -rf "$tmpdir"; return 1
+        fi
+    fi
+
+    local archfile="${tmpdir}/dl.${atype}"
+    if ! curl -fsSL --max-time 60 "$url" -o "$archfile"; then
+        echo -e "  ${RED}[!] Download failed. Check your connection or try the repository/brew install instead.${NC}"
+        rm -rf "$tmpdir"; return 1
+    fi
+
+    if [[ "$atype" == "zip" ]]; then
+        if ! command -v unzip &>/dev/null; then
+            echo -e "  ${RED}[!] 'unzip' is required for this download (brew install unzip / apt install unzip).${NC}"
+            rm -rf "$tmpdir"; return 1
+        fi
+        unzip -q "$archfile" -d "$tmpdir"
+    else
+        tar -xzf "$archfile" -C "$tmpdir" 2>/dev/null
+    fi
+
+    local binpath
+    binpath=$(find "$tmpdir" -type f -name "$findname" | head -1)
+    if [[ -n "$binpath" ]]; then
+        cp "$binpath" "${install_dir}/${installas}"
+        chmod +x "${install_dir}/${installas}"
+        echo -e "  ${GREEN}[✔] ${installas} installed to ${install_dir}/${installas}${NC}"
+        log_action "Installed ${label} via binary pull"
+        rm -rf "$tmpdir"; return 0
+    else
+        echo -e "  ${RED}[!] Downloaded archive but couldn't locate the '${findname}' binary inside it.${NC}"
+        rm -rf "$tmpdir"; return 1
+    fi
+}
 install_from_binary() {
     local tool="$1"
     local install_dir="${HOME}/.local/bin"
     mkdir -p "$install_dir"
 
-    local os
+    local os m
     os=$(uname -s)
-    if [[ "$os" != "Linux" ]]; then
-        echo -e "  ${YELLOW}[i] Binary auto-install currently supports Linux only. On macOS, use: brew install ${tool}${NC}"
+    m=$(uname -m)
+
+    if [[ "$os" != "Linux" && "$os" != "Darwin" ]]; then
+        echo -e "  ${YELLOW}[i] Binary auto-install currently supports Linux and macOS only.${NC}"
         return
     fi
 
-    local tmpdir
-    tmpdir=$(mktemp -d)
+    # Two arch-naming families seen across these tools' release assets:
+    #   gnu_target: x86_64-unknown-linux-gnu / x86_64-apple-darwin  (delta, git-absorb)
+    #   gh_style:   amd64 / arm64                                   (gh, glab, ghq)
+    #   x86_style:  x86_64 / arm64                                  (lazygit, act, jq mac)
+    local gnu_target="" gh_arch="" x86_arch=""
+    if [[ "$os" == "Linux" ]]; then
+        case "$m" in
+            x86_64|amd64)  gnu_target="x86_64-unknown-linux-gnu";  gh_arch="amd64"; x86_arch="x86_64" ;;
+            aarch64|arm64) gnu_target="aarch64-unknown-linux-gnu"; gh_arch="arm64"; x86_arch="arm64"  ;;
+            *) echo -e "  ${RED}[!] Unsupported CPU architecture (${m}) for binary pull.${NC}"; return ;;
+        esac
+    else
+        case "$m" in
+            x86_64|amd64) gnu_target="x86_64-apple-darwin";  gh_arch="amd64"; x86_arch="x86_64" ;;
+            arm64)        gnu_target="aarch64-apple-darwin"; gh_arch="arm64"; x86_arch="arm64"  ;;
+            *) echo -e "  ${RED}[!] Unsupported CPU architecture (${m}) for binary pull.${NC}"; return ;;
+        esac
+    fi
 
     case "$tool" in
         gh)
-            local arch tag ver url
-            arch=$(detect_binary_arch "gh_style")
-            if [[ -z "$arch" ]]; then
-                echo -e "  ${RED}[!] Unsupported CPU architecture for gh binary pull.${NC}"
-                rm -rf "$tmpdir"; return
-            fi
-            tag=$(fetch_latest_release_tag "cli/cli" "v2.63.0")
-            ver="${tag#v}"
-            url="https://github.com/cli/cli/releases/download/${tag}/gh_${ver}_linux_${arch}.tar.gz"
-            echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
-            if curl -fsSL --max-time 60 "$url" -o "${tmpdir}/gh.tar.gz"; then
-                tar -xzf "${tmpdir}/gh.tar.gz" -C "$tmpdir"
-                local binpath
-                binpath=$(find "$tmpdir" -type f -name "gh" -path "*/bin/*" | head -1)
-                if [[ -n "$binpath" ]]; then
-                    cp "$binpath" "${install_dir}/gh"
-                    chmod +x "${install_dir}/gh"
-                    echo -e "  ${GREEN}[✔] gh installed to ${install_dir}/gh${NC}"
-                    log_action "Installed gh via binary pull (${tag})"
-                else
-                    echo -e "  ${RED}[!] Downloaded archive but couldn't locate the 'gh' binary inside it.${NC}"
-                fi
+            local tag ver url atype
+            tag=$(fetch_latest_release_tag "cli/cli" "v2.63.0"); ver="${tag#v}"
+            if [[ "$os" == "Darwin" ]]; then
+                url="https://github.com/cli/cli/releases/download/${tag}/gh_${ver}_macOS_${gh_arch}.zip"; atype="zip"
             else
-                echo -e "  ${RED}[!] Download failed. Check your connection or try the repository install instead.${NC}"
+                url="https://github.com/cli/cli/releases/download/${tag}/gh_${ver}_linux_${gh_arch}.tar.gz"; atype="tar"
             fi
+            _gw_fetch_and_install_binary "$install_dir" "$url" "$atype" "gh" "gh" "gh (${tag})"
             ;;
         delta)
-            local target tag ver url
-            target=$(detect_binary_arch "gnu_target")
-            if [[ -z "$target" ]]; then
-                echo -e "  ${RED}[!] Unsupported CPU architecture for delta binary pull.${NC}"
-                rm -rf "$tmpdir"; return
-            fi
-            tag=$(fetch_latest_release_tag "dandavison/delta" "0.18.2")
-            ver="${tag#v}"
-            url="https://github.com/dandavison/delta/releases/download/${tag}/delta-${ver}-${target}.tar.gz"
-            echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
-            if curl -fsSL --max-time 60 "$url" -o "${tmpdir}/delta.tar.gz"; then
-                tar -xzf "${tmpdir}/delta.tar.gz" -C "$tmpdir"
-                local binpath
-                binpath=$(find "$tmpdir" -type f -name "delta" | head -1)
-                if [[ -n "$binpath" ]]; then
-                    cp "$binpath" "${install_dir}/delta"
-                    chmod +x "${install_dir}/delta"
-                    echo -e "  ${GREEN}[✔] delta installed to ${install_dir}/delta${NC}"
-                    log_action "Installed delta via binary pull (${tag})"
-                else
-                    echo -e "  ${RED}[!] Downloaded archive but couldn't locate the 'delta' binary inside it.${NC}"
-                fi
-            else
-                echo -e "  ${RED}[!] Download failed. Check your connection or try the repository install instead.${NC}"
-            fi
+            local tag ver url
+            tag=$(fetch_latest_release_tag "dandavison/delta" "0.18.2"); ver="${tag#v}"
+            url="https://github.com/dandavison/delta/releases/download/${tag}/delta-${ver}-${gnu_target}.tar.gz"
+            _gw_fetch_and_install_binary "$install_dir" "$url" "tar" "delta" "delta" "delta (${tag})"
             ;;
         glab)
-            local arch tag ver url
-            arch=$(detect_binary_arch "gh_style")
-            if [[ -z "$arch" ]]; then
-                echo -e "  ${RED}[!] Unsupported CPU architecture for glab binary pull.${NC}"
-                rm -rf "$tmpdir"; return
-            fi
-            # glab's canonical home moved to gitlab.com/gitlab-org/cli — query GitLab's
-            # own API for the tag, NOT GitHub's stale profclems/glab mirror (mismatched
-            # tags between the two was the previous bug causing 404s).
+            local tag ver url platform
             tag=$(curl -fsSL --max-time 10 "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases?per_page=1&order_by=released_at&sort=desc" 2>/dev/null \
                   | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/')
-            if [[ -z "$tag" ]]; then
-                echo -e "  ${YELLOW}[i] Could not reach GitLab's API. Falling back to a known-good version: v1.51.0${NC}" >&2
-                tag="v1.51.0"
-            fi
+            [[ -z "$tag" ]] && tag="v1.51.0"
             ver="${tag#v}"
-            url="https://gitlab.com/gitlab-org/cli/-/releases/${tag}/downloads/glab_${ver}_linux_${arch}.tar.gz"
-            echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
-            if curl -fsSL --max-time 60 "$url" -o "${tmpdir}/glab.tar.gz"; then
-                tar -xzf "${tmpdir}/glab.tar.gz" -C "$tmpdir" 2>/dev/null
-                local binpath
-                binpath=$(find "$tmpdir" -type f -name "glab" | head -1)
-                if [[ -n "$binpath" ]]; then
-                    cp "$binpath" "${install_dir}/glab"
-                    chmod +x "${install_dir}/glab"
-                    echo -e "  ${GREEN}[✔] glab installed to ${install_dir}/glab${NC}"
-                    log_action "Installed glab via binary pull (${tag})"
-                else
-                    echo -e "  ${RED}[!] Downloaded archive but couldn't locate the 'glab' binary inside it.${NC}"
-                fi
-            else
-                echo -e "  ${RED}[!] Download failed for tag ${tag}. Check https://gitlab.com/gitlab-org/cli/-/releases manually for the current asset name.${NC}"
-            fi
+            [[ "$os" == "Darwin" ]] && platform="darwin" || platform="linux"
+            url="https://gitlab.com/gitlab-org/cli/-/releases/${tag}/downloads/glab_${ver}_${platform}_${gh_arch}.tar.gz"
+            _gw_fetch_and_install_binary "$install_dir" "$url" "tar" "glab" "glab" "glab (${tag})"
             ;;
         git-absorb)
-            local target tag url
-            target=$(detect_binary_arch "gnu_target")
-            if [[ -z "$target" ]]; then
-                echo -e "  ${RED}[!] Unsupported CPU architecture for git-absorb binary pull.${NC}"
-                rm -rf "$tmpdir"; return
-            fi
+            local tag url
             tag=$(fetch_latest_release_tag "tummychow/git-absorb" "0.6.11")
-            url="https://github.com/tummychow/git-absorb/releases/download/${tag}/git-absorb-${target}"
-            echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
-            if curl -fsSL --max-time 60 "$url" -o "${install_dir}/git-absorb"; then
-                chmod +x "${install_dir}/git-absorb"
-                echo -e "  ${GREEN}[✔] git-absorb installed to ${install_dir}/git-absorb${NC}"
-                log_action "Installed git-absorb via binary pull (${tag})"
-            else
-                echo -e "  ${RED}[!] Download failed. If tummychow/git-absorb has no matching asset for this release, try: cargo install git-absorb (needs Rust: sudo apt install cargo)${NC}"
-            fi
+            url="https://github.com/tummychow/git-absorb/releases/download/${tag}/git-absorb-${gnu_target}"
+            _gw_fetch_and_install_binary "$install_dir" "$url" "raw" "" "git-absorb" "git-absorb (${tag})"
+            [[ $? -ne 0 ]] && echo -e "  ${CYAN}    Alternative: cargo install git-absorb (needs Rust)${NC}"
+            ;;
+        jq)
+            local tag url platform
+            tag=$(fetch_latest_release_tag "jqlang/jq" "jq-1.7.1")
+            [[ "$os" == "Darwin" ]] && platform="macos" || platform="linux"
+            url="https://github.com/jqlang/jq/releases/download/${tag}/jq-${platform}-${gh_arch}"
+            _gw_fetch_and_install_binary "$install_dir" "$url" "raw" "" "jq" "jq (${tag})"
             ;;
         ghq)
-            local arch tag url
-            arch=$(detect_binary_arch "gh_style")
-            if [[ -z "$arch" ]]; then
-                echo -e "  ${RED}[!] Unsupported CPU architecture for ghq binary pull.${NC}"
-                rm -rf "$tmpdir"; return
-            fi
+            local tag url platform
             tag=$(fetch_latest_release_tag "x-motemen/ghq" "v1.7.1")
-            url="https://github.com/x-motemen/ghq/releases/download/${tag}/ghq_linux_${arch}.zip"
-            echo -e "  ${CYAN}--> Downloading: ${url}${NC}"
-            if command -v unzip &>/dev/null && curl -fsSL --max-time 60 "$url" -o "${tmpdir}/ghq.zip"; then
-                unzip -q "${tmpdir}/ghq.zip" -d "$tmpdir"
-                local binpath
-                binpath=$(find "$tmpdir" -type f -name "ghq" | head -1)
-                if [[ -n "$binpath" ]]; then
-                    cp "$binpath" "${install_dir}/ghq"
-                    chmod +x "${install_dir}/ghq"
-                    echo -e "  ${GREEN}[✔] ghq installed to ${install_dir}/ghq${NC}"
-                    log_action "Installed ghq via binary pull (${tag})"
-                else
-                    echo -e "  ${RED}[!] Downloaded archive but couldn't locate the 'ghq' binary inside it.${NC}"
-                fi
-            elif ! command -v unzip &>/dev/null; then
-                echo -e "  ${RED}[!] 'unzip' is required for this download. Install it with: sudo apt install unzip${NC}"
-            else
-                echo -e "  ${RED}[!] Download failed. Check your connection or try: go install github.com/x-motemen/ghq@latest (needs Go)${NC}"
-            fi
+            [[ "$os" == "Darwin" ]] && platform="darwin" || platform="linux"
+            url="https://github.com/x-motemen/ghq/releases/download/${tag}/ghq_${platform}_${gh_arch}.zip"
+            _gw_fetch_and_install_binary "$install_dir" "$url" "zip" "ghq" "ghq" "ghq (${tag})"
+            ;;
+        lazygit)
+            local tag ver url platform
+            tag=$(fetch_latest_release_tag "jesseduffield/lazygit" "v0.44.1"); ver="${tag#v}"
+            [[ "$os" == "Darwin" ]] && platform="Darwin" || platform="Linux"
+            url="https://github.com/jesseduffield/lazygit/releases/download/${tag}/lazygit_${ver}_${platform}_${x86_arch}.tar.gz"
+            _gw_fetch_and_install_binary "$install_dir" "$url" "tar" "lazygit" "lazygit" "lazygit (${tag})"
+            ;;
+        act)
+            local tag url platform
+            tag=$(fetch_latest_release_tag "nektos/act" "v0.2.68")
+            [[ "$os" == "Darwin" ]] && platform="Darwin" || platform="Linux"
+            url="https://github.com/nektos/act/releases/download/${tag}/act_${platform}_${x86_arch}.tar.gz"
+            _gw_fetch_and_install_binary "$install_dir" "$url" "tar" "act" "act" "act (${tag})"
             ;;
     esac
 
-    rm -rf "$tmpdir"
-
     if [[ ":$PATH:" != *":${install_dir}:"* ]]; then
-        echo -e "  ${YELLOW}[i] Note: ${install_dir} is not on your PATH yet.${NC}"
-        echo -e "      Add this to your ~/.bashrc or ~/.zshrc: ${GREEN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+        export PATH="${install_dir}:$PATH"
+        hash -r 2>/dev/null || true
+        local path_line="export PATH=\"${install_dir}:\$PATH\""
+        for rc in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.profile"; do
+            touch "$rc" 2>/dev/null
+            if ! grep -qF "$path_line" "$rc" 2>/dev/null; then
+                {
+                    echo ''
+                    echo '# Added by git-wizard: makes binary-installed tools (gh/delta/glab/etc) available'
+                    echo "$path_line"
+                } >> "$rc" 2>/dev/null
+            fi
+        done
+        echo -e "  ${GREEN}[✔] ${install_dir} added to PATH for this session AND future terminals.${NC}"
+        log_action "PATH updated in-session + persisted: ${install_dir}"
     fi
 }
 
@@ -1589,19 +1760,8 @@ one_click_ssh_to_github() {
     echo -e "  ${GREEN}5.${NC} Test the SSH connection to GitHub"
     echo ""
 
-    # --- Prerequisite: gh CLI must be installed ---
-    if ! command -v gh &>/dev/null; then
-        echo -e "${RED}[!] 'gh' (GitHub CLI) is required for automatic key upload.${NC}"
-        suggest_install "gh"
-        pause
-        return
-    fi
-
-    # --- Prerequisite: gh must be authenticated ---
-    if ! gh auth status &>/dev/null; then
-        echo -e "${RED}[!] 'gh' is installed but NOT logged in to GitHub.${NC}"
-        echo -e "${CYAN}    Run this first: ${GREEN}gh auth login${NC}"
-        echo -e "${CYAN}    Then come back and retry this option.${NC}"
+    # --- Prerequisite: gh installed + authenticated (self-healing) ---
+    if ! ensure_gh_ready; then
         pause
         return
     fi
@@ -1830,20 +1990,11 @@ one_click_ssh_to_github() {
 # GITHUB SSH KEY MANAGER (Interactive TUI - Perfect Table & Purge)
 # ==============================================================================
 manage_github_ssh_keys() {
-    if ! command -v gh &>/dev/null; then
-        echo -e "${RED}[!] 'gh' (GitHub CLI) is required.${NC}"
-        suggest_install "gh"
+    if ! ensure_gh_ready; then
         pause
         return
     fi
-    if ! command -v jq &>/dev/null; then
-        echo -e "${RED}[!] 'jq' is required to parse the key table.${NC}"
-        echo -e "${CYAN}    Install with: ${GREEN}sudo apt install jq${NC}"
-        pause
-        return
-    fi
-    if ! gh auth status &>/dev/null; then
-        echo -e "${RED}[!] 'gh' is not logged in. Run: ${GREEN}gh auth login${NC}"
+    if ! ensure_jq_ready; then
         pause
         return
     fi
@@ -2693,6 +2844,256 @@ manage_identity() {
         esac
     done
 }
+
+# ==============================================================================
+# SMART CONFLICT RESOLVER — with Force Push / Force Pull ROLLBACK
+# State files live in ~/.git-wizard/rollback/ (one pair per repo, last op only)
+# ==============================================================================
+ROLLBACK_DIR="${CONFIG_DIR}/rollback"
+
+_gw_rb_file() {   # $1 = push | pull
+    mkdir -p "$ROLLBACK_DIR"
+    local key
+    key=$(printf '%s' "$TARGET_REPO_DIR" | cksum | awk '{print $1}')
+    echo "${ROLLBACK_DIR}/${key}.$1"
+}
+
+smart_force_push() {
+    local BRANCH="$1" TS REMOTE_SHA="" LOCAL_SHA
+    if ! confirm_destructive "Force push '${BRANCH}' — overwrites the remote branch"; then
+        echo -e "${YELLOW}[i] Cancelled.${NC}"; return
+    fi
+    create_safety_backup "pre-force-push"
+    TS=$(date '+%Y%m%d-%H%M%S')
+    LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
+
+    if [[ "$DRY_RUN" != "true" ]]; then
+        echo -e "${CYAN}--> Recording current remote state (for rollback)...${NC}"
+        if ! git fetch origin 2>/dev/null; then
+            echo -e "${RED}[!] Fetch failed — rollback point can't be recorded. Aborting, nothing pushed.${NC}"
+            return
+        fi
+        REMOTE_SHA=$(git rev-parse --verify -q "origin/${BRANCH}")
+    fi
+
+    if [[ -n "$REMOTE_SHA" ]]; then
+        local RTAG="backup/remote-${BRANCH//\//-}-${TS}"
+        git tag "$RTAG" "$REMOTE_SHA"
+        cat > "$(_gw_rb_file push)" <<EOF
+RB_BRANCH="${BRANCH}"
+RB_REMOTE_SHA="${REMOTE_SHA}"
+RB_PUSHED_SHA="${LOCAL_SHA}"
+RB_TAG="${RTAG}"
+RB_TIME="${TS}"
+EOF
+        echo -e "${GREEN}[✔] Rollback point saved: ${CYAN}${RTAG}${NC} ${GREEN}(${REMOTE_SHA:0:8})${NC}"
+        log_action "Force-push rollback point saved: ${RTAG}"
+    elif [[ "$DRY_RUN" != "true" ]]; then
+        echo -e "${YELLOW}[i] origin/${BRANCH} doesn't exist yet — nothing to roll back to.${NC}"
+        rm -f "$(_gw_rb_file push)"
+    fi
+
+    # --force-with-lease also protects you if someone pushed between fetch and push
+    local push_args=(push origin "$BRANCH")
+    if [[ -n "$REMOTE_SHA" ]]; then
+        push_args+=("--force-with-lease=${BRANCH}:${REMOTE_SHA}")
+    else
+        push_args+=(--force)
+    fi
+    if run_git "${push_args[@]}"; then
+        echo -e "${GREEN}[✔] Force push done. Undo it anytime via 'Rollback Last Force Push'.${NC}"
+    else
+        echo -e "${RED}[!] Force push failed (branch protection? someone pushed meanwhile?).${NC}"
+        rm -f "$(_gw_rb_file push)"
+    fi
+}
+
+rollback_force_push() {
+    local f; f="$(_gw_rb_file push)"
+    if [[ ! -f "$f" ]]; then
+        echo -e "${YELLOW}[i] No force push recorded for this repo — nothing to roll back.${NC}"; return
+    fi
+    local RB_BRANCH RB_REMOTE_SHA RB_PUSHED_SHA RB_TAG RB_TIME
+    source "$f"
+
+    echo -e "${CYAN}Last force push:${NC} branch ${BOLD}${RB_BRANCH}${NC} at ${RB_TIME}"
+    echo -e "${CYAN}Remote was at:${NC}   ${RB_REMOTE_SHA:0:8}  (tag ${RB_TAG})"
+
+    if ! git cat-file -e "${RB_REMOTE_SHA}^{commit}" 2>/dev/null; then
+        echo -e "${RED}[!] The old commit no longer exists locally (tag deleted / repo re-cloned). Can't roll back.${NC}"; return
+    fi
+    git fetch origin 2>/dev/null
+    local CURRENT
+    CURRENT=$(git rev-parse --verify -q "origin/${RB_BRANCH}")
+    if [[ -z "$CURRENT" ]]; then
+        echo -e "${RED}[!] origin/${RB_BRANCH} no longer exists on the remote.${NC}"; return
+    fi
+    if [[ "$CURRENT" != "$RB_PUSHED_SHA" ]]; then
+        echo -e "${YELLOW}[!] WARNING: the remote has changed since your force push (now ${CURRENT:0:8}).${NC}"
+        echo -e "${YELLOW}    Rolling back will also discard those newer remote commits.${NC}"
+    fi
+
+    if ! confirm_destructive "Roll remote '${RB_BRANCH}' back to ${RB_REMOTE_SHA:0:8} (undo your force push)"; then
+        echo -e "${YELLOW}[i] Cancelled.${NC}"; return
+    fi
+
+    # Make the rollback itself reversible
+    [[ "$DRY_RUN" != "true" ]] && git tag "backup/pre-rollback-push-$(date '+%Y%m%d-%H%M%S')" "$CURRENT"
+
+    if run_git push origin "${RB_REMOTE_SHA}:refs/heads/${RB_BRANCH}" \
+            "--force-with-lease=refs/heads/${RB_BRANCH}:${CURRENT}"; then
+        [[ "$DRY_RUN" != "true" ]] && rm -f "$f"
+        echo -e "${GREEN}[✔] Remote '${RB_BRANCH}' restored to ${RB_REMOTE_SHA:0:8}.${NC}"
+        echo -e "${CYAN}    Your LOCAL branch still has the new commits — use 'Force Pull' if you want local to match GitHub again.${NC}"
+        log_action "Force-push ROLLED BACK: ${RB_BRANCH} -> ${RB_REMOTE_SHA}"
+    else
+        echo -e "${RED}[!] Rollback push failed (branch protection or remote changed again).${NC}"
+    fi
+}
+
+smart_force_pull() {
+    local BRANCH="$1" TS HEAD_SHA STASH_MSG=""
+    if ! confirm_destructive "Force pull — overwrites local '${BRANCH}' with origin/${BRANCH}"; then
+        echo -e "${YELLOW}[i] Cancelled.${NC}"; return
+    fi
+    echo -e "${CYAN}--> Fetching...${NC}"
+    if ! run_git fetch origin; then
+        echo -e "${RED}[!] Fetch failed. Nothing was changed.${NC}"; return
+    fi
+    if [[ "$DRY_RUN" != "true" ]] && ! git rev-parse --verify -q "origin/${BRANCH}" >/dev/null; then
+        echo -e "${RED}[!] origin/${BRANCH} doesn't exist. Nothing was changed.${NC}"; return
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        run_git reset --hard "origin/${BRANCH}"; run_git clean -fd; return
+    fi
+
+    TS=$(date '+%Y%m%d-%H%M%S')
+    HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
+    local PTAG="backup/pre-force-pull-${BRANCH//\//-}-${TS}"
+    [[ -n "$HEAD_SHA" ]] && git tag "$PTAG" "$HEAD_SHA"
+
+    # Save uncommitted + untracked files too (reset --hard / clean -fd would destroy them)
+    if [[ -n "$(git status --porcelain)" ]]; then
+        STASH_MSG="gw-force-pull-${TS}"
+        if ! git stash push -u -m "$STASH_MSG" >/dev/null 2>&1; then
+            echo -e "${RED}[!] Couldn't stash your local changes — aborting so nothing is lost.${NC}"; return
+        fi
+        echo -e "${GREEN}[✔] Uncommitted/untracked files saved in stash '${STASH_MSG}'.${NC}"
+    fi
+
+    cat > "$(_gw_rb_file pull)" <<EOF
+RB_BRANCH="${BRANCH}"
+RB_HEAD_SHA="${HEAD_SHA}"
+RB_TAG="${PTAG}"
+RB_STASH_MSG="${STASH_MSG}"
+RB_TIME="${TS}"
+EOF
+    echo -e "${GREEN}[✔] Rollback point saved: ${CYAN}${PTAG}${NC}"
+    log_action "Force-pull rollback point saved: ${PTAG} (stash: ${STASH_MSG:-none})"
+
+    run_git reset --hard "origin/${BRANCH}"
+    run_git clean -fd
+    echo -e "${GREEN}[✔] Local '${BRANCH}' now matches origin/${BRANCH}. Undo via 'Rollback Last Force Pull'.${NC}"
+}
+
+rollback_force_pull() {
+    local f; f="$(_gw_rb_file pull)"
+    if [[ ! -f "$f" ]]; then
+        echo -e "${YELLOW}[i] No force pull recorded for this repo — nothing to roll back.${NC}"; return
+    fi
+    local RB_BRANCH RB_HEAD_SHA RB_TAG RB_STASH_MSG RB_TIME
+    source "$f"
+
+    echo -e "${CYAN}Last force pull:${NC} branch ${BOLD}${RB_BRANCH}${NC} at ${RB_TIME}"
+    echo -e "${CYAN}Local was at:${NC}    ${RB_HEAD_SHA:0:8}  (tag ${RB_TAG})"
+    [[ -n "$RB_STASH_MSG" ]] && echo -e "${CYAN}Uncommitted files:${NC} saved in stash '${RB_STASH_MSG}' (will be restored)"
+
+    if [[ -z "$RB_HEAD_SHA" ]] || ! git cat-file -e "${RB_HEAD_SHA}^{commit}" 2>/dev/null; then
+        echo -e "${RED}[!] The old commit no longer exists locally. Can't roll back.${NC}"; return
+    fi
+    if ! confirm_destructive "Restore local '${RB_BRANCH}' to ${RB_HEAD_SHA:0:8} (undo your force pull)"; then
+        echo -e "${YELLOW}[i] Cancelled.${NC}"; return
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        run_git checkout "$RB_BRANCH"; run_git reset --hard "$RB_HEAD_SHA"
+        [[ -n "$RB_STASH_MSG" ]] && echo -e "${YELLOW}[DRY-RUN] Would pop stash '${RB_STASH_MSG}'${NC}"
+        return
+    fi
+
+    # Anything done since the force pull is saved first, so this is reversible too
+    local NOW; NOW=$(date '+%Y%m%d-%H%M%S')
+    git tag "backup/pre-rollback-pull-${NOW}" HEAD 2>/dev/null
+    if [[ -n "$(git status --porcelain)" ]]; then
+        git stash push -u -m "gw-pre-rollback-${NOW}" >/dev/null 2>&1
+        echo -e "${YELLOW}[i] Your current uncommitted changes were stashed as 'gw-pre-rollback-${NOW}'.${NC}"
+    fi
+
+    local cur; cur=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+    [[ "$cur" != "$RB_BRANCH" ]] && git checkout "$RB_BRANCH"
+
+    if ! git reset --hard "$RB_HEAD_SHA"; then
+        echo -e "${RED}[!] Reset failed.${NC}"; return
+    fi
+    echo -e "${GREEN}[✔] Branch '${RB_BRANCH}' restored to ${RB_HEAD_SHA:0:8}.${NC}"
+
+    if [[ -n "$RB_STASH_MSG" ]]; then
+        local ref
+        ref=$(git stash list | grep -F "$RB_STASH_MSG" | head -1 | cut -d: -f1)
+        if [[ -n "$ref" ]] && git stash pop "$ref" >/dev/null 2>&1; then
+            echo -e "${GREEN}[✔] Your uncommitted/untracked files are back.${NC}"
+        else
+            echo -e "${YELLOW}[!] Couldn't auto-restore the stash. Check 'git stash list' for '${RB_STASH_MSG}'.${NC}"
+        fi
+    fi
+    rm -f "$f"
+    log_action "Force-pull ROLLED BACK: ${RB_BRANCH} -> ${RB_HEAD_SHA}"
+}
+
+smart_conflict_resolver() {
+    while true; do
+        show_header
+        local BRANCH
+        BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+        local push_note="" pull_note=""
+        [[ -f "$(_gw_rb_file push)" ]] && push_note=" ${GREEN}(available)${NC}"
+        [[ -f "$(_gw_rb_file pull)" ]] && pull_note=" ${GREEN}(available)${NC}"
+
+        echo -e "${YELLOW}${BOLD}🛠️  SMART CONFLICT PUSH RESOLVER${NC}  ${CYAN}(branch: ${BRANCH})${NC}\n"
+        echo -e "  ${GREEN}[1]${NC} Safe Pull & Rebase"
+        echo -e "  ${GREEN}[2]${NC} Safe Pull & Merge"
+        echo -e "  ${RED}[3]${NC} Force Push ${RED}(Overwrites remote!)${NC}"
+        echo -e "  ${RED}[4]${NC} Force Pull ${RED}(Overwrites local!)${NC}"
+        echo -e "  ${GREEN}[5]${NC} ⏪ Rollback Last Force Push${push_note}"
+        echo -e "  ${GREEN}[6]${NC} ⏪ Rollback Last Force Pull${pull_note}"
+        echo -e "  ${GREEN}[0]${NC} Back"
+        read -e -p "Select strategy [0-6]: " STRAT
+        case $STRAT in
+            1)
+                if run_git pull origin "$BRANCH" --rebase; then
+                    run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Pull succeeded but push failed.${NC}"
+                else
+                    echo -e "${RED}[!] Pull/rebase failed — resolve conflicts manually.${NC}"
+                fi
+                pause ;;
+            2)
+                if run_git pull origin "$BRANCH" --rebase=false --allow-unrelated-histories; then
+                    run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Pull succeeded but push failed.${NC}"
+                else
+                    echo -e "${RED}[!] Pull/merge failed — resolve conflicts manually.${NC}"
+                fi
+                pause ;;
+            3) smart_force_push "$BRANCH"; pause ;;
+            4) smart_force_pull "$BRANCH"; pause ;;
+            5) rollback_force_push; pause ;;
+            6) rollback_force_pull; pause ;;
+            0) break ;;
+            *) echo -e "${RED}Invalid choice!${NC}"; sleep 1 ;;
+        esac
+    done
+}
+
 # ==============================================================================
 # MODULE 2: Repository Setup, Status & Reset Engine
 # ==============================================================================
@@ -2778,52 +3179,7 @@ manage_repo() {
                     esac
                 done
                 ;;
-            6)
-                show_header
-                BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
-                echo -e "  ${GREEN}[1]${NC} Safe Pull & Rebase"
-                echo -e "  ${GREEN}[2]${NC} Safe Pull & Merge"
-                echo -e "  ${RED}[3]${NC} Force Push ${RED}(Overwrites remote!)${NC}"
-                echo -e "  ${RED}[4]${NC} Force Pull ${RED}(Overwrites local!)${NC}"
-                echo -e "  ${GREEN}[5]${NC} Cancel"
-                read -e -p "Select strategy [1-5]: " STRAT
-                case $STRAT in
-                    1)
-                        if run_git pull origin "$BRANCH" --rebase; then
-                            run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Pull succeeded but push failed.${NC}"
-                        else
-                            echo -e "${RED}[!] Pull/rebase failed — resolve conflicts manually.${NC}"
-                        fi
-                        ;;
-                    2)
-                        if run_git pull origin "$BRANCH" --rebase=false --allow-unrelated-histories; then
-                            run_git push origin "$BRANCH" || echo -e "${YELLOW}[!] Pull succeeded but push failed.${NC}"
-                        else
-                            echo -e "${RED}[!] Pull/merge failed — resolve conflicts manually.${NC}"
-                        fi
-                        ;;
-                    3)
-                        if confirm_destructive "Force push — can overwrite remote history"; then
-                            create_safety_backup "pre-force-push"
-                            run_git push origin "$BRANCH" --force
-                        fi
-                        ;;
-                    4)
-                        if confirm_destructive "Force pull — overwrites local branch '${BRANCH}' with origin/${BRANCH}"; then
-                            create_safety_backup "pre-force-pull"
-                            if run_git fetch origin; then
-                                run_git reset --hard "origin/${BRANCH}"
-                                run_git clean -fd
-                                echo -e "${GREEN}[✔] Local branch now matches origin/${BRANCH}.${NC}"
-                            else
-                                echo -e "${RED}[!] Fetch failed. Aborting — nothing was reset.${NC}"
-                            fi
-                        fi
-                        ;;
-                    *) echo "Cancelled." ;;
-                esac
-                pause
-                ;;
+            6) smart_conflict_resolver ;;
             7)
                 echo -e "  [1] Python  [2] Node.js  [3] Go/Linux"
                 read -e -p "Choice [1-3]: " GI_CHOICE
@@ -3516,6 +3872,56 @@ ensure_vcs_ready() {
         github) gh auth status &>/dev/null || { echo -e "${RED}[!] Still not authenticated.${NC}"; return 1; } ;;
         gitlab) glab auth status &>/dev/null || { echo -e "${RED}[!] Still not authenticated.${NC}"; return 1; } ;;
     esac
+    return 0
+}
+
+# ==============================================================================
+# ENSURE GH IS INSTALLED + AUTHENTICATED (self-healing, no manual detour)
+# Returns 0 if gh is installed AND authenticated after this call.
+# ==============================================================================
+ensure_gh_ready() {
+    if ! command -v gh &>/dev/null; then
+        echo -e "${YELLOW}[i] 'gh' (GitHub CLI) is required — installing automatically...${NC}"
+        offer_install "gh"          # tries repo package manager, then binary pull fallback
+        hash -r 2>/dev/null || true
+        if ! command -v gh &>/dev/null; then
+            echo -e "${RED}[!] Could not install 'gh' automatically. Check your network/package manager.${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}[✔] 'gh' installed.${NC}"
+        log_action "Auto-installed gh"
+    fi
+
+    if ! gh auth status &>/dev/null; then
+        echo -e "${YELLOW}[i] 'gh' is not logged in yet — launching 'gh auth login' now.${NC}"
+        echo -e "${CYAN}    Follow the browser/device-code prompts that appear.${NC}\n"
+        gh auth login
+        if ! gh auth status &>/dev/null; then
+            echo -e "${RED}[!] Still not authenticated after 'gh auth login'. Aborting this operation.${NC}"
+            return 1
+        fi
+        log_action "Authenticated gh via ensure_gh_ready"
+    fi
+
+    return 0
+}
+
+# ==============================================================================
+# ENSURE JQ IS INSTALLED (self-healing)
+# ==============================================================================
+ensure_jq_ready() {
+    if command -v jq &>/dev/null; then
+        return 0
+    fi
+    echo -e "${YELLOW}[i] 'jq' is required — installing automatically...${NC}"
+    offer_install "jq"
+    hash -r 2>/dev/null || true
+    if ! command -v jq &>/dev/null; then
+        echo -e "${RED}[!] Could not install 'jq' automatically. Check your network/package manager.${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}[✔] 'jq' installed.${NC}"
+    log_action "Auto-installed jq"
     return 0
 }
 
@@ -5182,6 +5588,10 @@ tool_stack_manager_menu() {
         esac
     done
 }
+
+if ! ensure_git_installed; then
+    exit 1
+fi
 
 load_config
 if [[ -z "$WIZARD_MODE" ]]; then

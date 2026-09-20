@@ -24,28 +24,150 @@ function Get-WingetId {
 
 function Test-WingetAvailable { return [bool](Get-Command winget -ErrorAction SilentlyContinue) }
 
+# ==============================================================================
+# REFRESH PATH IN-PROCESS — winget/MSI installers update the registry's PATH,
+# not the CURRENTLY RUNNING PowerShell session's $env:Path. Without this,
+# 'Get-Command $Tool' right after a successful install falsely reports
+# failure and tells the user to restart their terminal, even though the
+# install actually worked. Same fix already applied to Ensure-GhReady and
+# Ensure-GitInstalled — every winget/installer call site needs this.
+# ==============================================================================
+function Update-SessionPath {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $userPath    = [Environment]::GetEnvironmentVariable("Path", "User")
+    $env:Path    = "$machinePath;$userPath"
+}
+
+# ==============================================================================
+# BINARY-PULL FALLBACK — mirrors install_from_binary() on the Linux side.
+# Used when winget is missing or the winget install itself fails. Downloads
+# a prebuilt Windows release asset straight from the tool's GitHub (or
+# GitLab, for glab) releases and drops it into a folder on PATH — no admin
+# rights, no installer wizard.
+# ==============================================================================
+function Install-ToolBinaryFallback {
+    param([string]$Tool)
+
+    $installDir = Join-Path $env:USERPROFILE ".git-wizard\bin"
+    New-Item -Path $installDir -ItemType Directory -Force | Out-Null
+    $tmpDir = Join-Path $env:TEMP "gwbin_$(Get-Random)"
+    New-Item -Path $tmpDir -ItemType Directory -Force | Out-Null
+
+    $downloadUrl = $null
+    $exeNameInArchive = "$Tool.exe"
+
+    try {
+        switch ($Tool) {
+            "gh" {
+                $release = Invoke-RestMethod -Uri "https://api.github.com/repos/cli/cli/releases/latest" -ErrorAction Stop
+                $asset = $release.assets | Where-Object { $_.name -match "windows_amd64\.zip$" } | Select-Object -First 1
+                $downloadUrl = $asset.browser_download_url
+            }
+            "delta" {
+                $release = Invoke-RestMethod -Uri "https://api.github.com/repos/dandavison/delta/releases/latest" -ErrorAction Stop
+                $asset = $release.assets | Where-Object { $_.name -match "x86_64-pc-windows-msvc\.zip$" } | Select-Object -First 1
+                $downloadUrl = $asset.browser_download_url
+            }
+            "glab" {
+                $rel = Invoke-RestMethod -Uri "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases?per_page=1&order_by=released_at&sort=desc" -ErrorAction Stop
+                $tag = $rel[0].tag_name
+                $ver = $tag.TrimStart('v')
+                $downloadUrl = "https://gitlab.com/gitlab-org/cli/-/releases/$tag/downloads/glab_${ver}_windows_amd64.zip"
+            }
+            "lazygit" {
+                $release = Invoke-RestMethod -Uri "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" -ErrorAction Stop
+                $asset = $release.assets | Where-Object { $_.name -match "Windows_x86_64\.zip$" } | Select-Object -First 1
+                $downloadUrl = $asset.browser_download_url
+            }
+            default {
+                Write-Host "  [i] No binary-fallback recipe known for '$Tool' yet — repository install is the only option." -ForegroundColor Yellow
+                Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+                return $false
+            }
+        }
+
+        if (-not $downloadUrl) {
+            Write-Host "  [!] Could not find a matching Windows release asset for '$Tool'." -ForegroundColor Red
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+
+        $zipPath = Join-Path $tmpDir "$Tool.zip"
+        Write-Host "  --> Downloading: $downloadUrl" -ForegroundColor Cyan
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -ErrorAction Stop
+
+        Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
+        $exeFound = Get-ChildItem -Path $tmpDir -Recurse -Filter $exeNameInArchive | Select-Object -First 1
+
+        if (-not $exeFound) {
+            Write-Host "  [!] Downloaded archive but couldn't locate '$exeNameInArchive' inside it." -ForegroundColor Red
+            Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+            return $false
+        }
+
+        Copy-Item $exeFound.FullName -Destination (Join-Path $installDir $exeNameInArchive) -Force
+        Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+
+        # Same in-session + persistent PATH fix as Ensure-GhReady's fallback.
+        if ($env:Path -notlike "*$installDir*") { $env:Path = "$installDir;$env:Path" }
+        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+        if ($userPath -notlike "*$installDir*") {
+            [Environment]::SetEnvironmentVariable("Path", "$userPath;$installDir", "User")
+        }
+
+        Write-Host "  [+] '$Tool' installed to $installDir via binary pull." -ForegroundColor Green
+        if (Get-Command Write-WizardActionLog -ErrorAction SilentlyContinue) {
+            Write-WizardActionLog "Installed optional tool: $Tool (binary pull fallback)"
+        }
+        return $true
+    } catch {
+        Write-Host "  [!] Binary fallback failed: $_" -ForegroundColor Red
+        Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+}
+
 function Install-ToolViaWinget {
     param([string]$Tool)
-    if (-not (Test-WingetAvailable)) {
-        Write-Host "  [!] winget not found on this system. Install '$Tool' manually, or via Windows App Installer." -ForegroundColor Red
-        return
-    }
-    $id = Get-WingetId -Tool $Tool
-    Write-Host "  Detected package manager: winget" -ForegroundColor Cyan
-    Write-Host "  Install with: winget install --id $id -e" -ForegroundColor Green
-    $doInstall = Read-Host "  Install '$Tool' now? (y/N)"
-    if ($doInstall -match '^[Yy]$') {
-        winget install --id $id -e
-        if (Get-Command $Tool -ErrorAction SilentlyContinue) {
-            Write-Host "  [+] '$Tool' installed successfully." -ForegroundColor Green
-            if (Get-Command Write-WizardActionLog -ErrorAction SilentlyContinue) {
-                Write-WizardActionLog "Installed optional tool: $Tool (via winget)"
+
+    $wingetOk = Test-WingetAvailable
+    $installedOk = $false
+
+    if ($wingetOk) {
+        $id = Get-WingetId -Tool $Tool
+        Write-Host "  Detected package manager: winget" -ForegroundColor Cyan
+        Write-Host "  Install with: winget install --id $id -e" -ForegroundColor Green
+        $doInstall = Read-Host "  Install '$Tool' now? (y/N)"
+        if ($doInstall -match '^[Yy]$') {
+            winget install --id $id -e --accept-source-agreements --accept-package-agreements
+            Update-SessionPath
+            if (Get-Command $Tool -ErrorAction SilentlyContinue) {
+                Write-Host "  [+] '$Tool' installed successfully via winget." -ForegroundColor Green
+                if (Get-Command Write-WizardActionLog -ErrorAction SilentlyContinue) {
+                    Write-WizardActionLog "Installed optional tool: $Tool (via winget)"
+                }
+                $installedOk = $true
+            } else {
+                Write-Host "  [!] winget ran but '$Tool' still isn't detected — trying a direct binary pull instead..." -ForegroundColor Yellow
             }
         } else {
-            Write-Host "  [!] Install ran, but '$Tool' still isn't on PATH. You may need to restart your terminal." -ForegroundColor Yellow
+            Write-Host "  [i] Skipped winget install." -ForegroundColor Yellow
+            return
         }
     } else {
-        Write-Host "  [i] Skipped." -ForegroundColor Yellow
+        Write-Host "  [i] winget not found on this system." -ForegroundColor Yellow
+        $doFallback = Read-Host "  Try a direct binary pull from GitHub/GitLab releases instead? (y/N)"
+        if ($doFallback -notmatch '^[Yy]$') {
+            Write-Host "  [i] Skipped. Install '$Tool' manually anytime." -ForegroundColor Yellow
+            return
+        }
+    }
+
+    if (-not $installedOk) {
+        $installedOk = Install-ToolBinaryFallback -Tool $Tool
+        if (-not $installedOk) {
+            Write-Host "  [!] Could not install '$Tool' automatically through any method." -ForegroundColor Red
+        }
     }
 }
 

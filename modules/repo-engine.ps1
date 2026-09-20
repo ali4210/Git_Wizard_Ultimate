@@ -104,61 +104,7 @@ function Manage-Repo {
                     } elseif ($resetChoice -eq "0") { return }
                 }
             }
-            "6" {
-                Show-Header
-                Write-Host "SMART CONFLICT PUSH RESOLVER`n" -ForegroundColor Yellow
-                $branch = git rev-parse --abbrev-ref HEAD 2>$null
-                Write-Host "Current Branch: $branch" -ForegroundColor Cyan
-                Write-Host "  [1] Safe Pull and Rebase" -ForegroundColor Green
-                Write-Host "  [2] Safe Pull and Merge" -ForegroundColor Green
-                Write-Host "  [3] Force Push (Overwrites remote!)" -ForegroundColor Red
-                Write-Host "  [4] Force Pull (Overwrites local!)" -ForegroundColor Red
-                Write-Host "  [0] Cancel" -ForegroundColor Green
-
-                $strat = Read-Host "Select strategy [0-4]"
-                if ($strat -eq "1") {
-                    if (Invoke-GitWizard pull origin "$branch" --rebase) {
-                        if (Invoke-GitWizard push origin "$branch") {
-                            Write-Host "[+] Synced and pushed!" -ForegroundColor Green
-                        } else {
-                            Write-Host "[!] Pull succeeded but push failed." -ForegroundColor Yellow
-                        }
-                    } else {
-                        Write-Host "[!] Pull/rebase failed - resolve conflicts manually." -ForegroundColor Red
-                    }
-                } elseif ($strat -eq "2") {
-                    if (Invoke-GitWizard pull origin "$branch" --rebase=$false --allow-unrelated-histories) {
-                        if (Invoke-GitWizard push origin "$branch") {
-                            Write-Host "[+] Merged and pushed!" -ForegroundColor Green
-                        } else {
-                            Write-Host "[!] Pull succeeded but push failed." -ForegroundColor Yellow
-                        }
-                    } else {
-                        Write-Host "[!] Pull/merge failed - resolve conflicts manually." -ForegroundColor Red
-                    }
-                } elseif ($strat -eq "3") {
-                    if (Confirm-DestructiveAction "Force push - can overwrite remote history") {
-                        New-SafetyBackup "pre-force-push"
-                        if (Invoke-GitWizard push origin "$branch" --force) {
-                            Write-Host "[+] Force push complete!" -ForegroundColor Green
-                        } else {
-                            Write-Host "[!] Force push failed. Check your remote/connection." -ForegroundColor Red
-                        }
-                    }
-                } elseif ($strat -eq "4") {
-                    if (Confirm-DestructiveAction "Force pull - overwrites local branch '$branch' with origin/$branch") {
-                        New-SafetyBackup "pre-force-pull"
-                        if (Invoke-GitWizard fetch origin) {
-                            Invoke-GitWizard reset --hard "origin/$branch" | Out-Null
-                            Invoke-GitWizard clean -fd | Out-Null
-                            Write-Host "[+] Local branch now matches origin/$branch." -ForegroundColor Green
-                        } else {
-                            Write-Host "[!] Fetch failed. Aborting - nothing was reset." -ForegroundColor Red
-                        }
-                    }
-                }
-                Pause-Console
-            }
+            "6" { Show-ConflictResolverMenu }
             "7" {
                 Write-Host "Select template for .gitignore:"
                 Write-Host "  [1] Python / Django / Flask"

@@ -10,6 +10,78 @@ function Clean-RemoteUrl ($url) {
 }
 
 # ==============================================================================
+# ENSURE GH IS INSTALLED + AUTHENTICATED (self-healing, no manual detour)
+# Returns $true if gh is installed AND authenticated after this call.
+# ==============================================================================
+function Ensure-GhReady {
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        Write-Host "[i] 'gh' (GitHub CLI) is required - installing automatically..." -ForegroundColor Yellow
+
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            Write-Host "--> Running: winget install --id GitHub.cli -e --accept-source-agreements --accept-package-agreements" -ForegroundColor Cyan
+            winget install --id GitHub.cli -e --accept-source-agreements --accept-package-agreements | Out-Null
+
+            # winget updates PATH for new shells, not this running process -
+            # refresh $env:Path in-process from Machine+User scope so 'gh'
+            # resolves immediately without asking the user to reopen a terminal.
+            $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            $userPath    = [Environment]::GetEnvironmentVariable("Path", "User")
+            $env:Path    = "$machinePath;$userPath"
+        } else {
+            Write-Host "[!] winget not found. Falling back to a direct binary download..." -ForegroundColor Yellow
+            try {
+                $release = Invoke-RestMethod -Uri "https://api.github.com/repos/cli/cli/releases/latest" -ErrorAction Stop
+                $asset = $release.assets | Where-Object { $_.name -match "windows_amd64\.zip$" } | Select-Object -First 1
+                if ($asset) {
+                    $tmpZip = Join-Path $env:TEMP "gh_$(Get-Random).zip"
+                    $tmpDir = Join-Path $env:TEMP "gh_$(Get-Random)"
+                    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmpZip -ErrorAction Stop
+                    Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force
+                    $ghExe = Get-ChildItem -Path $tmpDir -Recurse -Filter "gh.exe" | Select-Object -First 1
+                    if ($ghExe) {
+                        $installDir = Join-Path $env:USERPROFILE ".git-wizard\bin"
+                        New-Item -Path $installDir -ItemType Directory -Force | Out-Null
+                        Copy-Item $ghExe.FullName -Destination (Join-Path $installDir "gh.exe") -Force
+                        if ($env:Path -notlike "*$installDir*") { $env:Path = "$installDir;$env:Path" }
+                        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+                        if ($userPath -notlike "*$installDir*") {
+                            [Environment]::SetEnvironmentVariable("Path", "$userPath;$installDir", "User")
+                        }
+                    }
+                    Remove-Item $tmpZip -Force -ErrorAction SilentlyContinue
+                    Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            } catch {
+                Write-Host "[!] Binary fallback download failed: $_" -ForegroundColor Red
+            }
+        }
+
+        if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            Write-Host "[!] Could not install 'gh' automatically. Check your network or install winget." -ForegroundColor Red
+            return $false
+        }
+        Write-Host "[+] 'gh' installed." -ForegroundColor Green
+        Write-WizardActionLog "Auto-installed gh"
+    }
+
+    $authCheck = $null
+    try { $authCheck = gh auth status 2>&1 | Out-String } catch {}
+    if ($authCheck -notmatch "Logged in to") {
+        Write-Host "[i] 'gh' is not logged in yet - launching 'gh auth login' now." -ForegroundColor Yellow
+        Write-Host "    Follow the browser/device-code prompts that appear.`n" -ForegroundColor Cyan
+        gh auth login
+        $authCheck = gh auth status 2>&1 | Out-String
+        if ($authCheck -notmatch "Logged in to") {
+            Write-Host "[!] Still not authenticated after 'gh auth login'. Aborting this operation." -ForegroundColor Red
+            return $false
+        }
+        Write-WizardActionLog "Authenticated gh via Ensure-GhReady"
+    }
+
+    return $true
+}
+
+# ==============================================================================
 # VAULT SECURITY HELPERS (Uses .NET Cryptography)
 # ==============================================================================
 function Get-HashedPass {
@@ -288,16 +360,7 @@ function Invoke-SshGithubSetupE2E {
     Write-Host "  4. Upload the public key to your GitHub account via API"
     Write-Host "  5. Test the SSH connection to GitHub`n"
 
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        Write-Host "[!] 'gh' CLI is required. Install via: winget install GitHub.cli" -ForegroundColor Red
-        Pause-Console
-        return
-    }
-
-    $authCheck = $null
-    try { $authCheck = gh auth status 2>&1 } catch {}
-    if ($authCheck -match "not logged in|error") {
-        Write-Host "[!] 'gh' is not logged in. Run: gh auth login" -ForegroundColor Red
+    if (-not (Ensure-GhReady)) {
         Pause-Console
         return
     }
@@ -450,7 +513,7 @@ function Invoke-SshGithubSetupE2E {
 # MANAGE GITHUB SSH KEYS
 # ==============================================================================
 function Manage-GithubSshKeys {
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Write-Host "[!] 'gh' CLI is required." -ForegroundColor Red; Pause-Console; return }
+    if (-not (Ensure-GhReady)) { Pause-Console; return }
     $ghUser = gh api user --jq '.login' 2>$null
     while ($true) {
         Show-Header

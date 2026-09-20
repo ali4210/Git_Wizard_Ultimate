@@ -32,6 +32,81 @@ $env:GIT_PAGER = "cat"
 $Global:ESC = [char]27   # Use [char]27 instead of `e — `e is only recognized in PowerShell 6+ (pwsh.exe).
                          # On Windows PowerShell 5.1 (powershell.exe), `e is dropped and prints as literal text.
 
+# ==============================================================================
+# ENSURE GIT ITSELF IS INSTALLED (bootstrap — must run before anything else
+# touches the 'git' command). Fast path: winget (silent, no wizard).
+# Fallback: download the official Git for Windows installer and run it with
+# Inno Setup silent switches — still no clicking through screens.
+# ==============================================================================
+function Ensure-GitInstalled {
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        return $true
+    }
+
+    Write-Host "[i] 'git' is not installed on this system - installing automatically..." -ForegroundColor Yellow
+
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "--> Running: winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements" -ForegroundColor Cyan
+        winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements | Out-Null
+
+        # Refresh PATH in-process immediately — same fix as Ensure-GhReady,
+        # so this doesn't require reopening the terminal to take effect.
+        $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+        $userPath    = [Environment]::GetEnvironmentVariable("Path", "User")
+        $env:Path    = "$machinePath;$userPath"
+    }
+
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Write-Host "[+] git installed successfully via winget." -ForegroundColor Green
+        return $true
+    }
+
+    # --- Fallback: official installer, run SILENTLY (no wizard, no clicking) ---
+    Write-Host "[i] winget unavailable or install failed." -ForegroundColor Yellow
+    Write-Host "--> Falling back to a silent install of the official Git for Windows installer..." -ForegroundColor Cyan
+
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -ErrorAction Stop
+        $asset = $release.assets | Where-Object { $_.name -match "^Git-.*-64-bit\.exe$" } | Select-Object -First 1
+
+        if ($asset) {
+            $installerPath = Join-Path $env:TEMP "GitForWindows_$(Get-Random).exe"
+            Write-Host "    Downloading: $($asset.browser_download_url)" -ForegroundColor Cyan
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installerPath -ErrorAction Stop
+
+            Write-Host "    Installing silently (no wizard, no clicking required)..." -ForegroundColor Cyan
+            Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT", "/NORESTART", "/NOCANCEL", "/SP-", "/SUPPRESSMSGBOXES" -Wait
+
+            Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+
+            # Git for Windows installs to Program Files by default — refresh PATH.
+            $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            $userPath    = [Environment]::GetEnvironmentVariable("Path", "User")
+            $env:Path    = "$machinePath;$userPath"
+        } else {
+            Write-Host "[!] Could not find a 64-bit installer asset in the latest release." -ForegroundColor Red
+        }
+    } catch {
+        Write-Host "[!] Fallback download/install failed: $_" -ForegroundColor Red
+    }
+
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        Write-Host "[+] git installed successfully via silent installer fallback." -ForegroundColor Green
+        # NOTE: Write-WizardActionLog isn't defined yet at this point in the
+        # script (it's declared further down, after $ActionLog is set up),
+        # and Ensure-GitInstalled runs before that. Calling it here would
+        # throw a visible "term not recognized" error even though the
+        # install itself succeeded. Logging this specific bootstrap event
+        # is skipped for that reason — action logging resumes normally for
+        # every other operation once the rest of the script has loaded.
+        return $true
+    }
+
+    Write-Host "[!] Could not install git automatically through any method." -ForegroundColor Red
+    Write-Host "    Please install git manually from https://git-scm.com/download/win, then re-run git-wizard." -ForegroundColor Yellow
+    return $false
+}
+
 function Enter-AltScreen {
     # Kept for compatibility with existing calls elsewhere in the script.
     # No longer switches buffers — see note above. Just clears scrollback.
@@ -44,6 +119,11 @@ function Restore-Terminal {
 }
 
 Enter-AltScreen
+
+if (-not (Ensure-GitInstalled)) {
+    Restore-Terminal
+    exit 1
+}
 
 # Locate Script Directory & File Path strictly
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -68,7 +148,7 @@ $Global:SyncDetailLevel = "standard"  # minimal | standard | full
 $Global:GlobalCliEnabled = $false
 
 # --- Global Function Registration & Debugging ---
-$SubModules = @("identity-engine.ps1", "repo-engine.ps1", "branch-engine.ps1", "commit-engine.ps1", "team-engine.ps1", "vcs-engine.ps1", "toolstack-engine.ps1")
+$SubModules = @("identity-engine.ps1", "repo-engine.ps1", "branch-engine.ps1", "commit-engine.ps1", "team-engine.ps1", "vcs-engine.ps1", "toolstack-engine.ps1", "conflict-engine.ps1")
 $LoadErrors = @()
 
 foreach ($Mod in $SubModules) {

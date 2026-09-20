@@ -65,12 +65,12 @@ get_install_command() {
     case "$pm" in
         apt)
             case "$tool" in
-                delta) echo "sudo apt install -y git-delta" ;;
-                *) echo "sudo apt install -y ${tool}" ;;
+                delta) echo "sudo apt update && sudo apt install -y git-delta" ;;
+                *) echo "sudo apt update && sudo apt install -y ${tool}" ;;
             esac
             ;;
         dnf)    echo "sudo dnf install -y ${tool}" ;;
-        pacman) echo "sudo pacman -S --noconfirm ${tool}" ;;
+        pacman) echo "sudo pacman -Sy --noconfirm ${tool}" ;;
         zypper) echo "sudo zypper install -y ${tool}" ;;
         brew)   echo "brew install ${tool}" ;;
         *)      echo "" ;;
