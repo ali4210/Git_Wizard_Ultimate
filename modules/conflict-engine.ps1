@@ -19,6 +19,12 @@ function Invoke-SmartForcePush {
     if (-not (Confirm-DestructiveAction "Force push '$Branch' - overwrites the remote branch")) {
         Write-Host "[i] Cancelled." -ForegroundColor Yellow; return
     }
+    if (-not (git remote get-url origin 2>$null)) {
+        Write-Host "[!] No 'origin' remote is set - there is no GitHub repo to push to." -ForegroundColor Red
+        Write-Host "    Set it first: Main Menu > 1 > 4 (Remote URL), or clone your repo properly." -ForegroundColor Yellow
+        Write-Host "    Nothing was changed." -ForegroundColor Yellow
+        return
+    }
     # --- Auto stage + commit (asks for the message) so the push always has your latest work ---
     if (git status --porcelain) {
         Write-Host "--> Uncommitted changes detected:" -ForegroundColor Cyan
@@ -52,7 +58,7 @@ function Invoke-SmartForcePush {
 
     if (-not $Global:DryRun) {
         Write-Host "--> Recording current remote state (for rollback)..." -ForegroundColor Cyan
-        git fetch origin 2>$null | Out-Null
+        git fetch origin
         if ($LASTEXITCODE -ne 0) {
             Write-Host "[!] Fetch failed - rollback point can't be recorded. Aborting, nothing pushed." -ForegroundColor Red
             return
@@ -228,7 +234,7 @@ function Invoke-RollbackForcePull {
 function Show-ConflictResolverMenu {
     while ($true) {
         Show-Header
-        $Branch = git rev-parse --abbrev-ref HEAD 2>$null
+        $Branch = git symbolic-ref --short HEAD 2>$null
         if (-not $Branch) { $Branch = "main" }
         $pushNote = if (Test-Path (Get-RollbackFile push)) { " (available)" } else { "" }
         $pullNote = if (Test-Path (Get-RollbackFile pull)) { " (available)" } else { "" }

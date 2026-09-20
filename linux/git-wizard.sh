@@ -2863,6 +2863,11 @@ smart_force_push() {
     if ! confirm_destructive "Force push '${BRANCH}' — overwrites the remote branch"; then
         echo -e "${YELLOW}[i] Cancelled.${NC}"; return
     fi
+    if ! git remote get-url origin &>/dev/null; then
+        echo -e "${RED}[!] No 'origin' remote is set — there is no GitHub repo to push to.${NC}"
+        echo -e "${YELLOW}    Set it first: Main Menu > 1 > 4 (Remote URL). Nothing was changed.${NC}"
+        return
+    fi
     # --- Auto stage + commit (asks for the message) so the push always has your latest work ---
     if [[ -n "$(git status --porcelain)" ]]; then
         echo -e "${CYAN}--> Uncommitted changes detected:${NC}"
@@ -2885,7 +2890,7 @@ smart_force_push() {
 
     if [[ "$DRY_RUN" != "true" ]]; then
         echo -e "${CYAN}--> Recording current remote state (for rollback)...${NC}"
-        if ! git fetch origin 2>/dev/null; then
+        if ! git fetch origin; then
             echo -e "${RED}[!] Fetch failed — rollback point can't be recorded. Aborting, nothing pushed.${NC}"
             return
         fi
@@ -3071,7 +3076,7 @@ smart_conflict_resolver() {
     while true; do
         show_header
         local BRANCH
-        BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+        BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
         local push_note="" pull_note=""
         [[ -f "$(_gw_rb_file push)" ]] && push_note=" ${GREEN}(available)${NC}"
         [[ -f "$(_gw_rb_file pull)" ]] && pull_note=" ${GREEN}(available)${NC}"
