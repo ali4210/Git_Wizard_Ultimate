@@ -19,7 +19,33 @@ function Invoke-SmartForcePush {
     if (-not (Confirm-DestructiveAction "Force push '$Branch' - overwrites the remote branch")) {
         Write-Host "[i] Cancelled." -ForegroundColor Yellow; return
     }
-    New-SafetyBackup -Reason "pre-force-push"
+    # --- Auto stage + commit (asks for the message) so the push always has your latest work ---
+    if (git status --porcelain) {
+        Write-Host "--> Uncommitted changes detected:" -ForegroundColor Cyan
+        git status --short
+        Write-Host ""
+        $fpMsg = Read-Host "Enter commit message (ENTER to cancel)"
+        if (-not $fpMsg) {
+            Write-Host "[i] Cancelled - nothing was changed." -ForegroundColor Yellow; return
+        }
+        New-SafetyBackup -Reason "pre-force-push"
+        if ($Global:DryRun) {
+            Write-Host "[DRY-RUN] Would execute: git add -A ; git commit -m `"$fpMsg`"" -ForegroundColor Yellow
+        } else {
+            git add -A
+            git commit -m "$fpMsg"
+            if ($LASTEXITCODE -ne 0) {
+                # a pre-commit hook may have auto-fixed files: re-stage and retry once
+                git add -A
+                git commit -m "$fpMsg"
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "[!] Commit failed. Nothing was pushed." -ForegroundColor Red; return
+                }
+            }
+        }
+    } else {
+        New-SafetyBackup -Reason "pre-force-push"
+    }
     $ts = Get-Date -Format "yyyyMMdd-HHmmss"
     $localSha = git rev-parse HEAD 2>$null
     $remoteSha = $null

@@ -2863,7 +2863,23 @@ smart_force_push() {
     if ! confirm_destructive "Force push '${BRANCH}' — overwrites the remote branch"; then
         echo -e "${YELLOW}[i] Cancelled.${NC}"; return
     fi
-    create_safety_backup "pre-force-push"
+    # --- Auto stage + commit (asks for the message) so the push always has your latest work ---
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo -e "${CYAN}--> Uncommitted changes detected:${NC}"
+        git status --short
+        echo ""
+        read -e -p "Enter commit message (ENTER to cancel): " FP_MSG
+        if [[ -z "$FP_MSG" ]]; then
+            echo -e "${YELLOW}[i] Cancelled — nothing was changed.${NC}"; return
+        fi
+        create_safety_backup "pre-force-push"
+        run_git add -A
+        if ! commit_with_hook_retry "$FP_MSG"; then
+            echo -e "${RED}[!] Commit failed. Nothing was pushed.${NC}"; return
+        fi
+    else
+        create_safety_backup "pre-force-push"
+    fi
     TS=$(date '+%Y%m%d-%H%M%S')
     LOCAL_SHA=$(git rev-parse HEAD 2>/dev/null)
 
