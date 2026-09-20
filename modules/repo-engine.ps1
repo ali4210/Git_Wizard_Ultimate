@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # ENGINE NAME: repo-engine.ps1 (PowerShell 5.1 Clean Edition - V2.1 Gold Standard)
 # NEW IN V2.0: Force Sync with Origin (nuclear reset recovery), destructive
 #              operations routed through Invoke-GitWizard/New-SafetyBackup/

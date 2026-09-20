@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # ENGINE NAME: conflict-engine.ps1
 # Smart Conflict Resolver with Force Push / Force Pull ROLLBACK
 # Uses helpers from git-wizard.ps1: Show-Header, Pause-Console,

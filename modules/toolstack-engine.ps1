@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # ENGINE NAME: toolstack-engine.ps1 (Windows Edition) — NEW
 # DESCRIPTION: Windows equivalent of the Linux Tool Stack Manager: winget-based
 #              install offers, version checks against latest releases, the

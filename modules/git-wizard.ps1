@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # TOOL NAME:    git-wizard.ps1 (Windows Master Orchestrator V2.1 - Gold Standard)
 # AUTHOR:       Saleem (Open Source DevOps/Sec Contributor)
 # DESCRIPTION:  Master orchestrator loading Git-Wizard Windows modules with

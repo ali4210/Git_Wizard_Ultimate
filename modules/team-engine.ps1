@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # MODULE:       team-engine.ps1
 # PART OF:      git-wizard.ps1 (Windows Edition)
 # DESCRIPTION:  Module 5 - Team & Open-Source Collaboration

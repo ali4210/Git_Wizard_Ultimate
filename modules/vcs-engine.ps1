@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # ENGINE NAME: vcs-engine.ps1 (Windows Edition) — NEW
 # DESCRIPTION: Provider-agnostic GitHub/GitLab dispatch layer (mirrors the
 #              Linux vcs_* functions), Git Hosting Power Tools (Issues, PRs/MRs,
