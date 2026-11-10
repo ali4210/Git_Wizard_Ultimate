@@ -28,7 +28,7 @@ Built for beginners who fear `git push --force`, and for DevOps / DevSecOps engi
 
 <br/>
 
-[**Why**](#why) · [**Features**](#features) · [**Safety**](#safety) · [**Rollback**](#rollback) · [**Install**](#install) · [**Usage**](#usage) · [**Architecture**](#architecture) · [**FAQ**](#faq) · [**Roadmap**](#roadmap)
+[**Why**](#why) · [**Features**](#features) · [**Workspace Explorer**](#explorer) · [**Safety**](#safety) · [**Rollback**](#rollback) · [**Install**](#install) · [**Usage**](#usage) · [**Architecture**](#architecture) · [**FAQ**](#faq) · [**Roadmap**](#roadmap)
 
 </div>
 
@@ -155,7 +155,7 @@ The main menu is organised into nine modules. Every submenu uses **`0` = Back**,
 | # | Module | What it does |
 |:-:|---|---|
 | **1** | 🔐 **Identity and SSH** | Git identity, ED25519 keys, end-to-end SSH setup, GitHub key manager, PAT vault, remote URL manager |
-| **2** | 📦 **Repository and Smart Push** | 1-click repo setup and destroy, quick push, status, reset and undo, **Force Sync**, **Smart Conflict Resolver with rollback**, `.gitignore` generator, pre-commit hooks |
+| **2** | 📦 **Repository and Smart Push** | **Workspace Explorer** (status, diff, full history, guided revert), 1-click repo setup and destroy, quick push, reset and undo, **Force Sync**, **Smart Conflict Resolver with rollback**, `.gitignore` generator, pre-commit hooks |
 | **3** | 🌿 **Branch Manager** | Arrow-key branch switching, publish, and dual purge (local and remote) |
 | **4** | ✍️ **Conventional Commits** | Guided `feat / fix / docs / refactor / chore` messages with scope |
 | **5** | 👥 **Team and Open Source** | Linear workflow, Team Mode with admin review, fork and upstream sync, PRs, Safe Update Sync |
@@ -188,6 +188,7 @@ The main menu is organised into nine modules. Every submenu uses **`0` = Back**,
 
 | Capability | Details |
 |---|---|
+| **Workspace Explorer** | One keyboard-driven screen for status, diff, file/project history and guided revert — **`[W]`** on this menu. [Full details below](#explorer) |
 | **1-Click Complete Setup** | `git init` → `main` → commit → **creates the remote on GitHub/GitLab** (public or private) → choose SSH or HTTPS → set origin → push |
 | **1-Click Destroy** | Detects the remote from `origin`, deletes it on the host, and offers to auto-fix a missing `delete_repo` scope |
 | **Quick Push** | `add` → commit → push, with hook-retry |
@@ -276,6 +277,72 @@ The provider is **auto-detected from your `origin` URL**. The same menu drives t
 Detail levels: **Minimal** (tier, reachability, modified vs untracked) · **Standard** (adds stash count and last-commit age) · **Full** (adds a conflict-risk preview before you pull).
 
 </details>
+
+---
+
+<a id="explorer"></a>
+
+## 🧭 Workspace Explorer
+
+One keyboard-driven screen for everything you'd otherwise hop between `git status`, `git diff`, `git log` and `git revert`/`git restore` for — with every destructive action going through the same backup-and-confirm pipeline as the rest of the tool, plus its own one-step **Undo last action**.
+
+> [!TIP]
+> **Open it:** Main Menu → **`2`** (Repository) → **`[W]`** — it's the first, highlighted entry in Module 2's menu, on both Linux and Windows. Nothing else in Module 2 moved or changed.
+
+**One navigation model everywhere inside it:**
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Move |
+| `Enter` / `→` | Open (drill in) |
+| `Esc` / `←` | Back one level |
+| `Space` | Mark an item (Changes screen only) |
+| `/` | Filter the current list by typing part of a name |
+| `?` | Help for the current screen |
+| `q` | Quit the current sub-screen back to the Explorer's home screen |
+
+A breadcrumb at the top always shows where you are, e.g. `Changes › src/app.py › History › a1b2c3d`. Pressing `q` on the Explorer's own home screen (not a sub-screen) is what actually leaves the Explorer and returns to Module 2.
+
+### 📂 Screen 1 — Changes
+
+The `git status` view: every modified, staged, deleted, renamed and untracked file, badge-colored by kind. `Enter` on a file opens a scrollable, colored diff (rendered through `delta` when installed), with:
+
+| Key | Revert action | Underlying command |
+|---|---|---|
+| `1` | Revert to last commit | `git restore --source=HEAD --staged --worktree` |
+| `2` | Revert to the version before this file's last change | `git restore --source=<2nd-newest commit touching this file>` |
+| `3` | Revert to the original state (the commit that first added it) | `git restore --source=<commit from --diff-filter=A>` |
+| `D` *(untracked files only)* | Delete the file | `git clean -f` — **no backup tag is possible**: an untracked file was never committed, so this is the one action the Undo journal can't offer |
+| `H` | Jump to this file's **File Timeline** | — |
+
+Options `2`/`3` only appear when that earlier version actually exists; `1` is hidden for a brand-new, never-committed file. From the list itself: `R` reverts **all** tracked changes to their last commit (untracked files are never touched by a batch action), `M` reverts only the files you've **marked** with `Space`, and `H` opens the **File Timeline** for the highlighted file.
+
+A file with unresolved merge/rebase/cherry-pick conflict markers opens a dedicated screen instead, with `[A]` to abort the in-progress operation.
+
+### 📜 Screen 2 — File Timeline
+
+Every commit that touched the file (`git log --follow`), paged ~50 at a time (`N`/`P` for next/previous page). `Enter` on a commit shows that commit's change to the file, with four actions:
+
+| Key | Action | What it does |
+|---|---|---|
+| `A` | Apply this change to my current version | Re-applies that commit's patch on top of what you have now (`git apply --3way`) |
+| `F` | Restore file to how it was at this commit | `git restore --source=<hash>` for just this file |
+| `U` | Undo only this file's change in this commit | Reverse-applies just this file's part of the patch (`git apply -R --3way`) |
+| `C` | Undo this commit (safe) | `git revert` — a whole-commit, history-preserving undo that affects every file that commit touched, not just this one |
+
+`A`/`F`/`U` rewrite this file's working-tree (and, where relevant, staged) content; `C` creates a brand-new commit instead. If a revert conflicts, the Explorer shows the conflicted file(s) and offers to abort it on the spot.
+
+### 🕒 Screen 3 — Project Timeline
+
+Every commit in the repository, paged the same way. `Enter` on a commit shows its message, stats and the list of files it touched; `Enter` on one of those files drops you into **the exact same commit-detail screen as File Timeline** — same diff, same four actions (`A`/`F`/`U`/`C`), same safety net.
+
+### 🛟 Safety and Undo
+
+Every action above goes through **preview → confirm → automatic backup → execute → logged**, same as the rest of the tool (`run_git` / `Invoke-GitWizard`, `confirm_destructive` / `Confirm-DestructiveAction`, `create_safety_backup` / `New-SafetyBackup`). On top of that:
+
+- **A worktree-content backup, not just a tag.** A plain `git tag` only protects a *commit* — it captures nothing about uncommitted content, which is exactly what a revert in the Explorer discards. So every file-level action also copies the file's current worktree (and, if genuinely different, staged) content into `.git/wizard-backups/` first — byte-for-byte, including binary files, and preserving a staged/unstaged split exactly if the file had one.
+- **`[U]` Undo last action**, on the Changes screen, reverses the most recent Explorer action: for file-level actions, it restores the backed-up content; for "Undo this commit (safe)", it's a `reset --hard` to the tag taken right before that revert. Only the most recent action is tracked.
+- **Conflicts never leave you stuck**: a merge/rebase/cherry-pick/revert conflict is detected and offered an abort right there, instead of leaving half-finished state for you to untangle manually.
 
 ---
 
@@ -558,6 +625,7 @@ Core workflows behave the same on both platforms. A few extras are currently Lin
 
 | Feature | 🐧 Linux / 🍎 macOS | 🪟 Windows |
 |---|:---:|:---:|
+| **Workspace Explorer** (status, diff, history, revert) | ✅ | ✅ |
 | Identity, SSH, PAT vault, repo, branch, commit, team, hosting tools, delta suite | ✅ | ✅ |
 | Force push and force pull **rollback** | ✅ | ✅ |
 | Self-update, checkpoints, tool rollback | ✅ | ✅ |
@@ -681,11 +749,16 @@ Git_Wizard_Ultimate/
 ├── 🖼️ assets/
 │   └── octocat.png               # Header image (rendered with chafa when available)
 ├── 🐧 linux/
-│   └── git-wizard.sh             # Bash engine (all modules)
+│   ├── git-wizard.sh             # Bash engine (all modules)
+│   └── workspace-explorer.sh     # Workspace Explorer (Module 2 > [W]): data layer + UI
+├── 🛠️ dev-tools/
+│   ├── try-explorer.sh           # Standalone Workspace Explorer tester (Linux)
+│   └── try-explorer.ps1          # Standalone Workspace Explorer tester (Windows)
 └── 🪟 modules/                   # Windows PowerShell engine
     ├── git-wizard.ps1            # Orchestrator, config, safety/backup engine, main menu
     ├── identity-engine.ps1       # Module 1: identity, SSH, PAT vault, gh auth
     ├── repo-engine.ps1           # Module 2: repo setup/destroy, reset, force sync
+    ├── workspace-engine.ps1      # Workspace Explorer (Module 2 > [W]): data layer + UI
     ├── conflict-engine.ps1       # Smart Conflict Resolver + force push/pull rollback
     ├── branch-engine.ps1         # Module 3: arrow-key branch manager
     ├── commit-engine.ps1         # Module 4: conventional commits
