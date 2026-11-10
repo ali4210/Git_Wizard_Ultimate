@@ -610,7 +610,12 @@ function Invoke-WsListNavigate {
                 if ($key.StartsWith("CHAR:")) {
                     $c = $key.Substring(5)
                     if ($c -and $ExtraKeys.Contains($c)) {
-                        return [PSCustomObject]@{ Result = "key:$c"; Selected = -1 }
+                        # Also expose the row under the cursor at the moment
+                        # the extra key was pressed, same as "open" does, so
+                        # a per-row extra action knows which row it applies to.
+                        $sel = -1
+                        if ($visibleIdx.Count -gt 0) { $sel = $visibleIdx[$cursor] }
+                        return [PSCustomObject]@{ Result = "key:$c"; Selected = $sel }
                     }
                 }
             }
@@ -629,9 +634,11 @@ function Invoke-WsListNavigate {
 # uncommitted working-tree/index content these actions actually discard.
 # ==============================================================================
 
+$Global:WsLastActionKind = ""     # "files" | "commit"
 $Global:WsLastActionDesc = ""
 $Global:WsLastActionBackupDir = ""
-$Global:WsLastActionFiles = @()   # "sanitized|original_path" strings
+$Global:WsLastActionFiles = @()   # "sanitized|original_path" strings -- kind=files
+$Global:WsLastActionTag = ""      # backup tag to reset --hard to -- kind=commit
 
 function Get-WsGitDir {
     return (git rev-parse --git-dir 2>$null)
@@ -735,41 +742,76 @@ function Restore-WsFileContent {
     }
 }
 
-function Set-WsLastAction {
+# For worktree/index-level actions (the three revert options, revert-all,
+# revert-marked, apply/restore/undo-file) -- undo restores file CONTENT from
+# the backup dir, since a commit tag alone captures nothing about
+# uncommitted content (see this file's header note on the safety layer).
+function Set-WsLastActionFiles {
     param([string]$Desc, [string]$BackupDir, [string[]]$Files)
+    $Global:WsLastActionKind = "files"
     $Global:WsLastActionDesc = $Desc
     $Global:WsLastActionBackupDir = $BackupDir
     $Global:WsLastActionFiles = $Files
+    $Global:WsLastActionTag = ""
+    Write-WizardActionLog "WORKSPACE EXPLORER: $Desc"
+}
+
+# For commit-level actions ("Undo this commit (safe)" / git revert) -- undo
+# is a plain `git reset --hard` to the tag New-SafetyBackup already made,
+# which IS the correct and sufficient recovery for a commit-level change.
+function Set-WsLastActionCommit {
+    param([string]$Desc, [string]$Tag)
+    $Global:WsLastActionKind = "commit"
+    $Global:WsLastActionDesc = $Desc
+    $Global:WsLastActionTag = $Tag
+    $Global:WsLastActionBackupDir = ""
+    $Global:WsLastActionFiles = @()
     Write-WizardActionLog "WORKSPACE EXPLORER: $Desc"
 }
 
 function Invoke-WsUndoLastAction {
-    if (-not $Global:WsLastActionBackupDir) {
+    if (-not $Global:WsLastActionKind) {
         Write-Host "[i] Nothing to undo yet." -ForegroundColor Yellow
         Write-Host "Press any key to continue..." -NoNewline
         [void](Get-WsRawKey)
         Write-Host ""
         return
     }
-    if (-not (Test-Path -LiteralPath $Global:WsLastActionBackupDir)) {
+    if ($Global:WsLastActionKind -eq "files" -and -not (Test-Path -LiteralPath $Global:WsLastActionBackupDir)) {
         Write-Host "[!] Backup for the last action is missing - cannot undo." -ForegroundColor Red
         Write-Host "Press any key to continue..." -NoNewline
         [void](Get-WsRawKey)
         Write-Host ""
         return
     }
+    if ($Global:WsLastActionKind -eq "commit") {
+        git rev-parse -q --verify $Global:WsLastActionTag 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[!] Backup tag for the last action is missing - cannot undo." -ForegroundColor Red
+            Write-Host "Press any key to continue..." -NoNewline
+            [void](Get-WsRawKey)
+            Write-Host ""
+            return
+        }
+    }
     if (Confirm-DestructiveAction "Undo: $($Global:WsLastActionDesc)") {
         New-SafetyBackup "pre-undo"
-        foreach ($entry in $Global:WsLastActionFiles) {
-            $parts = $entry -split '\|', 2
-            $path = $parts[1]
-            Restore-WsFileContent -Path $path -BackupDir $Global:WsLastActionBackupDir
+        if ($Global:WsLastActionKind -eq "commit") {
+            Invoke-GitWizard reset --hard $Global:WsLastActionTag
+        } else {
+            foreach ($entry in $Global:WsLastActionFiles) {
+                $parts = $entry -split '\|', 2
+                $path = $parts[1]
+                Restore-WsFileContent -Path $path -BackupDir $Global:WsLastActionBackupDir
+            }
         }
         Write-WizardActionLog "UNDO: $($Global:WsLastActionDesc)"
         Write-Host "[+] Undone: $($Global:WsLastActionDesc)" -ForegroundColor Green
+        $Global:WsLastActionKind = ""
         $Global:WsLastActionDesc = ""
         $Global:WsLastActionBackupDir = ""
         $Global:WsLastActionFiles = @()
+        $Global:WsLastActionTag = ""
         Write-Host "Press any key to continue..." -NoNewline
         [void](Get-WsRawKey)
         Write-Host ""
@@ -784,6 +826,7 @@ function Get-WsInProgressOperation {
     if (-not $gd) { return "" }
     if (Test-Path -LiteralPath (Join-Path $gd "MERGE_HEAD")) { return "merge" }
     if (Test-Path -LiteralPath (Join-Path $gd "CHERRY_PICK_HEAD")) { return "cherry-pick" }
+    if (Test-Path -LiteralPath (Join-Path $gd "REVERT_HEAD")) { return "revert" }
     if ((Test-Path -LiteralPath (Join-Path $gd "rebase-merge")) -or (Test-Path -LiteralPath (Join-Path $gd "rebase-apply"))) { return "rebase" }
     return ""
 }
@@ -793,9 +836,10 @@ function Invoke-WsAbortInProgressOperation {
     switch ($kind) {
         "merge" { Invoke-GitWizard merge --abort; return $true }
         "cherry-pick" { Invoke-GitWizard cherry-pick --abort; return $true }
+        "revert" { Invoke-GitWizard revert --abort; return $true }
         "rebase" { Invoke-GitWizard rebase --abort; return $true }
         default {
-            Write-Host "[i] No merge, rebase, or cherry-pick currently in progress." -ForegroundColor Yellow
+            Write-Host "[i] No merge, rebase, revert, or cherry-pick currently in progress." -ForegroundColor Yellow
             return $false
         }
     }
@@ -923,6 +967,7 @@ Esc or Left - leave the Workspace Explorer    Space - mark a file
 R - revert ALL tracked changes to last commit (untracked files are never touched)
 M - revert only the MARKED files to last commit
 U - undo the last Explorer action (restores the files it changed)
+H - this file's full commit history (File Timeline)
 "@
 
 # ------------------------------------------------------------------------------
@@ -938,15 +983,15 @@ function Show-WsChangesScreen {
         foreach ($e in $status) { $items += (Format-WsStatusRow -Entry $e) }
 
         $undoHint = ""
-        if ($Global:WsLastActionBackupDir) {
+        if ($Global:WsLastActionKind) {
             $undoHint = "  $($Global:WsCyan)[U]$($Global:WsReset) Undo: $($Global:WsLastActionDesc)"
         }
-        $extraBar = "$($Global:WsCyan)[R]$($Global:WsReset) Revert all  $($Global:WsCyan)[M]$($Global:WsReset) Revert marked$undoHint"
+        $extraBar = "$($Global:WsCyan)[R]$($Global:WsReset) Revert all  $($Global:WsCyan)[M]$($Global:WsReset) Revert marked  $($Global:WsCyan)[H]$($Global:WsReset) File Timeline$undoHint"
 
         $result = Invoke-WsListNavigate -Items $items -Title "CHANGES  ($($status.Count) file(s))" `
             -Breadcrumb @("Changes") -Markable $true -Filterable $true `
             -HelpText $Global:WsChangesHelpText -ExtraBar $extraBar `
-            -MarkedIndices $navMarked -ExtraKeys "RMU"
+            -MarkedIndices $navMarked -ExtraKeys "RMUH"
 
         switch ($result.Result) {
             "open" {
@@ -968,6 +1013,12 @@ function Show-WsChangesScreen {
             }
             "key:U" {
                 Invoke-WsUndoLastAction
+            }
+            "key:H" {
+                if ($result.Selected -ge 0) {
+                    $r = Show-WsFileTimelineScreen -Path $status[$result.Selected].Path
+                    if (-not $r) { return }
+                }
             }
             default {
                 return
@@ -1008,7 +1059,7 @@ function Invoke-WsChangesRevertAll {
         $filesForJournal += "$sanitized|$($t.Path)"
         Invoke-GitWizard restore --source=HEAD --staged --worktree "--" $t.Path
     }
-    Set-WsLastAction -Desc "Revert all ($($targets.Count) file(s)) to last commit" -BackupDir $backupDir -Files $filesForJournal
+    Set-WsLastActionFiles -Desc "Revert all ($($targets.Count) file(s)) to last commit" -BackupDir $backupDir -Files $filesForJournal
     Write-Host "[+] Reverted $($targets.Count) file(s)." -ForegroundColor Green
     Write-Host "Press any key to continue..." -NoNewline
     [void](Get-WsRawKey)
@@ -1066,7 +1117,7 @@ function Invoke-WsChangesRevertMarked {
         $filesForJournal += "$sanitized|$($t.Path)"
         Invoke-GitWizard restore --source=HEAD --staged --worktree "--" $t.Path
     }
-    Set-WsLastAction -Desc "Revert marked ($($targets.Count) file(s)) to last commit" -BackupDir $backupDir -Files $filesForJournal
+    Set-WsLastActionFiles -Desc "Revert marked ($($targets.Count) file(s)) to last commit" -BackupDir $backupDir -Files $filesForJournal
     Write-Host "[+] Reverted $($targets.Count) marked file(s)." -ForegroundColor Green
     Write-Host "Press any key to continue..." -NoNewline
     [void](Get-WsRawKey)
@@ -1100,7 +1151,16 @@ function Show-WsConflictScreen {
                 Write-WsBreadcrumb -Breadcrumb @("Changes", "$Path (CONFLICT)")
                 if (Confirm-DestructiveAction "Abort the in-progress $kindLabel - discards ALL conflict-resolution progress") {
                     New-SafetyBackup "pre-$kindLabel-abort"
-                    if (Invoke-WsAbortInProgressOperation) {
+                    # Checks actual state afterward rather than trusting
+                    # Invoke-WsAbortInProgressOperation's return value: its
+                    # last statement is a bare Invoke-GitWizard call, whose
+                    # unsuppressed native-command output (git's own "Aborting"
+                    # style messages) becomes part of the function's own
+                    # return array, which -- just like the note on this same
+                    # pattern in Invoke-WsPerformCommitRevertSafe -- is always
+                    # truthy in an `if` regardless of its trailing boolean.
+                    [void](Invoke-WsAbortInProgressOperation)
+                    if (-not (Get-WsInProgressOperation)) {
                         Write-Host "[+] Aborted." -ForegroundColor Green
                         Write-Host "Press any key to continue..." -NoNewline
                         [void](Get-WsRawKey)
@@ -1255,10 +1315,395 @@ function Invoke-WsPerformSingleRevert {
         return $false
     }
 
-    Set-WsLastAction -Desc "Revert '$Path' to $Label" -BackupDir $backupDir -Files @("$sanitized|$Path")
+    Set-WsLastActionFiles -Desc "Revert '$Path' to $Label" -BackupDir $backupDir -Files @("$sanitized|$Path")
     Write-Host "[+] Reverted." -ForegroundColor Green
     Write-Host "Press any key to continue..." -NoNewline
     [void](Get-WsRawKey)
     Write-Host ""
     return $true
+}
+
+# ==============================================================================
+# STAGE 4 OF 6: FILE TIMELINE -- all commits touching one file (git log
+# --follow), paged ~50 at a time; a commit's change to that file; and the
+# four commit actions (Apply / Restore file / Undo file change / Undo
+# commit safely). Mirrors linux/workspace-explorer.sh's Stage 4
+# function-for-function. Screen 5 (Project Timeline) reuses
+# Invoke-WsCommitListScreen below, per the original spec's "reusing the
+# same commit-detail code" instruction.
+# ==============================================================================
+
+function Format-WsCommitRow {
+    param([string]$Hash, [string]$Author, [string]$Date, [string]$Subject)
+    $h = $Hash.Substring(0, [Math]::Min(8, $Hash.Length))
+    return "$($Global:WsCyan)$($Global:WsBold)$h$($Global:WsReset)  $($Global:WsGreen)$Author$($Global:WsReset)  $($Global:WsYellow)$Date$($Global:WsReset)  $Subject"
+}
+
+# ------------------------------------------------------------------------------
+# Invoke-WsCommitListScreen -- generic paged commit browser shared by File
+# Timeline and Project Timeline.
+#
+# PARAMETERS:
+#   -FetchFn     scriptblock taking (limit, skip) that returns commit objects
+#                (.Hash/.Author/.Date/.Subject -- see Get-WsFileLog/Get-WsProjectLog)
+#   -CountFn     scriptblock taking no args that returns the total commit count
+#   -Title       title text (page/total appended automatically)
+#   -Breadcrumb  string[]
+#   -PageSize    commits per page (default 50)
+#
+# RETURNS: [PSCustomObject]@{ Result = "open"|"back"|"quit"; Commit = <obj> }
+# ------------------------------------------------------------------------------
+function Invoke-WsCommitListScreen {
+    param(
+        # "file" fetches via Get-WsFileLog/-Count for $Path; "project" fetches
+        # via Get-WsProjectLog/-Count. Deliberately NOT a pair of injected
+        # scriptblocks (e.g. via .GetNewClosure()) -- a closure created inside
+        # a function that was itself brought in by dot-sourcing can lose the
+        # ability to resolve sibling functions (confirmed: calling such a
+        # closure from here raised "the term '...' is not recognized") when
+        # the whole chain is invoked across a script-file boundary, which is
+        # exactly how the real tool's modules get loaded. A plain mode switch
+        # has no such risk.
+        [ValidateSet("file", "project")][string]$Mode,
+        [string]$Path = "",
+        [string]$Title,
+        [string[]]$Breadcrumb,
+        [int]$PageSize = 50
+    )
+
+    $page = 0
+    while ($true) {
+        if ($Mode -eq "file") {
+            $total = Get-WsFileLogCount -Path $Path
+        } else {
+            $total = Get-WsProjectLogCount
+        }
+        if (-not $total) { $total = 0 }
+
+        $totalPages = [Math]::Max(1, [Math]::Ceiling($total / [double]$PageSize))
+        if ($page -ge $totalPages) { $page = $totalPages - 1 }
+        if ($page -lt 0) { $page = 0 }
+        $skip = $page * $PageSize
+
+        if ($Mode -eq "file") {
+            $commits = @(Get-WsFileLog -Path $Path -Limit $PageSize -Skip $skip)
+        } else {
+            $commits = @(Get-WsProjectLog -Limit $PageSize -Skip $skip)
+        }
+        $items = @()
+        foreach ($c in $commits) { $items += (Format-WsCommitRow -Hash $c.Hash -Author $c.Author -Date $c.Date -Subject $c.Subject) }
+
+        $helpText = "Up/Down - move    Enter/Right - view this commit    Esc/Left - back`n/ - filter by author/date/message    N - next page    P - previous page    q - quit the Explorer"
+
+        $extraKeys = ""
+        $barParts = @()
+        if (($page + 1) -lt $totalPages) { $extraKeys += "N"; $barParts += "$($Global:WsCyan)[N]$($Global:WsReset) Next page" }
+        if ($page -gt 0) { $extraKeys += "P"; $barParts += "$($Global:WsCyan)[P]$($Global:WsReset) Previous page" }
+        $extraBar = $barParts -join "  "
+
+        $result = Invoke-WsListNavigate -Items $items -Title "$Title  (page $($page + 1)/$totalPages, $total commit(s) total)" `
+            -Breadcrumb $Breadcrumb -Markable $false -Filterable $true `
+            -HelpText $helpText -ExtraBar $extraBar -ExtraKeys $extraKeys
+
+        switch ($result.Result) {
+            "open" {
+                return [PSCustomObject]@{ Result = "open"; Commit = $commits[$result.Selected] }
+            }
+            "key:N" { $page++ }
+            "key:P" { $page--; if ($page -lt 0) { $page = 0 } }
+            default {
+                return [PSCustomObject]@{ Result = $result.Result; Commit = $null }
+            }
+        }
+    }
+}
+
+# ------------------------------------------------------------------------------
+# Invoke-WsPerformCommitFileAction <path> <hash> <label> <action fn name>
+# Shared confirm + file-content-backup + journal wrapper for the File
+# Timeline's Apply / Restore file / Undo file change actions.
+# ------------------------------------------------------------------------------
+function Invoke-WsPerformCommitFileAction {
+    param([string]$Path, [string]$Hash, [string]$Label, [string]$ActionFunction)
+
+    Show-WsHeader
+    Write-WsBreadcrumb -Breadcrumb @("Changes", $Path)
+    Write-Host "$Label`n" -ForegroundColor Yellow
+    $shortHash = $Hash.Substring(0, [Math]::Min(8, $Hash.Length))
+    if (-not (Confirm-DestructiveAction "${Label}: '$Path' at commit $shortHash")) {
+        return $false
+    }
+
+    $ts = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backupDir = Join-Path (Get-WsGitDir) "wizard-backups/commit-action-$ts"
+    $sanitized = Backup-WsFileContent -Path $Path -BackupDir $backupDir
+
+    $out = & $ActionFunction -Hash $Hash -Path $Path 2>&1
+    $outText = ($out | Out-String)
+
+    Set-WsLastActionFiles -Desc "${Label}: '$Path' at $shortHash" -BackupDir $backupDir -Files @("$sanitized|$Path")
+
+    if ($outText -match '(?m)^<{7}|^CONFLICT|with conflicts') {
+        Write-Host "[!] This didn't apply cleanly - '$Path' may now contain conflict markers." -ForegroundColor Red
+        Write-Host "    Use [U] Undo last action on the Changes screen to put it back exactly as it was." -ForegroundColor Yellow
+        if ($outText) { Write-Host "`n$outText" }
+    } else {
+        Write-Host "[+] Done." -ForegroundColor Green
+    }
+    Write-Host "Press any key to continue..." -NoNewline
+    [void](Get-WsRawKey)
+    Write-Host ""
+    return $true
+}
+
+# ------------------------------------------------------------------------------
+# Invoke-WsPerformCommitRevertSafe <hash> <subject>
+# "Undo this commit (safe)" -- a COMMIT-level action, so New-SafetyBackup's
+# tag IS the correct and sufficient undo mechanism. Detects and offers to
+# abort a revert conflict the same way the Changes screen handles merges.
+# ------------------------------------------------------------------------------
+function Invoke-WsPerformCommitRevertSafe {
+    param([string]$Hash, [string]$Subject)
+
+    $shortHash = $Hash.Substring(0, [Math]::Min(8, $Hash.Length))
+    Show-WsHeader
+    Write-WsBreadcrumb -Breadcrumb @("Changes")
+    Write-Host "UNDO THIS COMMIT (safe revert)`n" -ForegroundColor Yellow
+    Write-Host "Commit $shortHash`: $Subject`n"
+    if (-not (Confirm-DestructiveAction "Create a new commit that undoes $shortHash (`"$Subject`")")) {
+        return
+    }
+
+    $ts = Get-Date -Format "yyyyMMdd-HHmmss"
+    $tag = "backup/pre-revert-commit-$ts"
+    $headExists = git rev-parse HEAD 2>$null
+    if ($headExists -and -not $Global:DryRun) {
+        git tag $tag HEAD 2>$null | Out-Null
+    }
+    New-SafetyBackup "pre-revert-commit"
+
+    # Deliberately NOT "if (Invoke-WsRevertCommitSafe ...)": that function's
+    # last statement is a bare `Invoke-GitWizard revert ...` call, and on a
+    # conflict `git revert` prints several lines of hints to its own
+    # output -- unsuppressed native-command output inside a PowerShell
+    # function becomes part of that function's own return stream, so the
+    # caller receives an ARRAY of [...hint text..., $false], and a non-empty
+    # array is ALWAYS truthy in an `if` regardless of what its last element
+    # is. Checking actual repository state instead (did HEAD move; is a
+    # revert now mid-conflict) is unaffected by that pollution.
+    $headBefore = git rev-parse HEAD 2>$null
+    Invoke-WsRevertCommitSafe -Hash $Hash | Out-Null
+    $kind = Get-WsInProgressOperation
+    $headAfter = git rev-parse HEAD 2>$null
+
+    if ($kind -eq "revert") {
+        Write-Host "[!] The revert hit a conflict and is still in progress." -ForegroundColor Red
+        Write-Host "    Conflicted file(s):" -ForegroundColor Yellow
+        git diff --name-only --diff-filter=U 2>$null | ForEach-Object { Write-Host "      $_" }
+        Write-Host ""
+        Write-Host "  [A] Abort the revert (discards it, returns to the pre-revert state)" -ForegroundColor Red
+        Write-Host "  [Esc] Leave it - resolve the conflict manually, then commit" -ForegroundColor Yellow
+        $kchoice = Read-Host "Choice"
+        if ($kchoice -eq "a" -or $kchoice -eq "A") {
+            if (Confirm-DestructiveAction "Abort the in-progress revert") {
+                Invoke-GitWizard revert --abort
+                Write-Host "[+] Aborted." -ForegroundColor Green
+            }
+        }
+    } elseif ($headAfter -and $headAfter -ne $headBefore) {
+        Set-WsLastActionCommit -Desc "Undo commit $shortHash (`"$Subject`")" -Tag $tag
+        Write-Host "[+] Commit undone with a new revert commit." -ForegroundColor Green
+    } else {
+        Write-Host "[!] Revert failed - the working tree may have uncommitted changes to a file this commit touched." -ForegroundColor Red
+    }
+    Write-Host "Press any key to continue..." -NoNewline
+    [void](Get-WsRawKey)
+    Write-Host ""
+}
+
+# ------------------------------------------------------------------------------
+# Show-WsFileTimelineScreen <path> -- Screen 2: all commits touching this
+# file. Returns $false if the user quit the whole Explorer from here.
+# ------------------------------------------------------------------------------
+function Show-WsFileTimelineScreen {
+    param([string]$Path)
+
+    while ($true) {
+        $result = Invoke-WsCommitListScreen -Mode "file" -Path $Path `
+            -Title "FILE TIMELINE" -Breadcrumb @("Changes", $Path, "History") -PageSize 50
+
+        switch ($result.Result) {
+            "open" {
+                $r = Show-WsFileTimelineCommitScreen -Path $Path -Hash $result.Commit.Hash -Subject $result.Commit.Subject
+                if (-not $r) { return $false }
+            }
+            "quit" { return $false }
+            default { return $true }
+        }
+    }
+}
+
+# ------------------------------------------------------------------------------
+# Show-WsFileTimelineCommitScreen <path> <hash> <subject> -- that commit's
+# change to this one file, plus the four File Timeline actions.
+# ------------------------------------------------------------------------------
+function Show-WsFileTimelineCommitScreen {
+    param([string]$Path, [string]$Hash, [string]$Subject)
+
+    while ($true) {
+        $shortHash = $Hash.Substring(0, [Math]::Min(8, $Hash.Length))
+
+        if (Test-WsIsBinaryFile -Path $Path) {
+            $body = "$($Global:WsYellow)(binary file at this commit - diff not shown)$($Global:WsReset)"
+        } else {
+            $body = Format-WsDiffWithDelta -RawDiff (Get-WsCommitFileDiff -Hash $Hash -Path $Path)
+            if (-not $body) { $body = "$($Global:WsCyan)(no change to this file in this commit)$($Global:WsReset)" }
+        }
+
+        $extraBar = "$($Global:WsCyan)[A]$($Global:WsReset) Apply to current  $($Global:WsCyan)[F]$($Global:WsReset) Restore file to this commit  $($Global:WsCyan)[U]$($Global:WsReset) Undo only this file's change  $($Global:WsCyan)[C]$($Global:WsReset) Undo this commit (safe)"
+        $helpText = @"
+Up/Down - scroll    Esc/Left - back to this file's timeline
+A - apply this historical change to your current file
+F - restore the file to exactly how it looked at this commit
+U - undo only this commit's change to this one file (reverse-apply)
+C - undo the WHOLE commit safely (git revert -- affects every file it touched)
+"@
+
+        $result = Show-WsScrollView -Content $body -Breadcrumb @("Changes", $Path, "History", $shortHash) `
+            -ExtraBar $extraBar -ExtraKeys "AFUC" -HelpText $helpText
+
+        switch ($result.Result) {
+            "key:A" {
+                [void](Invoke-WsPerformCommitFileAction -Path $Path -Hash $Hash -Label "Apply this change to current version" -ActionFunction "Invoke-WsApplyCommitFileToCurrent")
+            }
+            "key:F" {
+                [void](Invoke-WsPerformCommitFileAction -Path $Path -Hash $Hash -Label "Restore file to how it was at this commit" -ActionFunction "Invoke-WsRestoreFileToCommit")
+            }
+            "key:U" {
+                [void](Invoke-WsPerformCommitFileAction -Path $Path -Hash $Hash -Label "Undo only this file's change in this commit" -ActionFunction "Invoke-WsUndoFileChangeInCommit")
+            }
+            "key:C" {
+                Invoke-WsPerformCommitRevertSafe -Hash $Hash -Subject $Subject
+                return $true
+            }
+            "quit" { return $false }
+            default { return $true }
+        }
+    }
+}
+
+# ==============================================================================
+# STAGE 5 OF 6: PROJECT TIMELINE -- all repo commits, paged ~50 at a time.
+# Enter shows message/stats/files touched; Enter on a file reuses
+# Show-WsFileTimelineCommitScreen from Stage 4 verbatim (same actions, same
+# code), per the original spec's "Same actions as the File Timeline, reusing
+# the same commit-detail code" instruction. Mirrors
+# linux/workspace-explorer.sh's Stage 5 function-for-function.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Show-WsProjectTimelineScreen -- Screen 3: all repo commits.
+# Returns $false if the user quit the whole Explorer from here.
+# ------------------------------------------------------------------------------
+function Show-WsProjectTimelineScreen {
+    while ($true) {
+        $result = Invoke-WsCommitListScreen -Mode "project" `
+            -Title "PROJECT TIMELINE" -Breadcrumb @("Project Timeline") -PageSize 50
+
+        switch ($result.Result) {
+            "open" {
+                $r = Show-WsProjectCommitDetailScreen -Hash $result.Commit.Hash -Subject $result.Commit.Subject
+                if (-not $r) { return $false }
+            }
+            "quit" { return $false }
+            default { return $true }
+        }
+    }
+}
+
+# ------------------------------------------------------------------------------
+# Show-WsProjectCommitDetailScreen <hash> <subject> -- message, stats, and
+# the list of files this commit touched; Enter on a file reuses
+# Show-WsFileTimelineCommitScreen (Stage 4) for that file's change in this
+# commit, with the same Apply/Restore/Undo-file/Undo-commit actions.
+# ------------------------------------------------------------------------------
+function Show-WsProjectCommitDetailScreen {
+    param([string]$Hash, [string]$Subject)
+
+    while ($true) {
+        $files = @(Get-WsCommitFiles -Hash $Hash)
+        $items = @()
+        foreach ($f in $files) { $items += "$($Global:WsCyan)$f$($Global:WsReset)" }
+
+        $summary = Get-WsCommitSummary -Hash $Hash
+        $title = "$summary`n`n$($Global:WsYellow)$($Global:WsBold)FILES TOUCHED ($($files.Count))$($Global:WsReset)"
+        $helpText = "Up/Down - move    Enter/Right - view this file's change in this commit`nEsc/Left - back to Project Timeline    / - filter by filename    q - quit the Explorer"
+
+        $result = Invoke-WsListNavigate -Items $items -Title $title -Breadcrumb @("Project Timeline", $Hash.Substring(0, [Math]::Min(8, $Hash.Length))) `
+            -Markable $false -Filterable $true -HelpText $helpText -ExtraBar "" -ExtraKeys ""
+
+        switch ($result.Result) {
+            "open" {
+                $r = Show-WsFileTimelineCommitScreen -Path $files[$result.Selected] -Hash $Hash -Subject $Subject
+                if (-not $r) { return $false }
+            }
+            "quit" { return $false }
+            default { return $true }
+        }
+    }
+}
+
+# ==============================================================================
+# STAGE 6 OF 6: TOP-LEVEL ENTRY SCREEN -- the home screen the Module 2 menu
+# entry opens. Changes, File Timeline (via a file you pick here), and
+# Project Timeline are all reachable from it. Mirrors
+# linux/workspace-explorer.sh's Stage 6 function-for-function -- see that
+# file's header comment on this screen for why "quit" inside a sub-screen
+# just returns here rather than exiting the whole tool.
+# ==============================================================================
+function Show-WsFileTimelinePickerScreen {
+    Show-WsHeader
+    Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer")
+    Write-Host "FILE TIMELINE`n" -ForegroundColor Yellow
+    Write-Host "Enter the path to a tracked file (relative to the repo root)." -ForegroundColor Cyan
+    $filepath = Read-Host "File path (ENTER with nothing to cancel)"
+    if (-not $filepath) { return }
+
+    git ls-files --error-unmatch -- $filepath 2>$null | Out-Null
+    $tracked = ($LASTEXITCODE -eq 0)
+    if (-not $tracked -and -not (Test-Path -LiteralPath $filepath)) {
+        Write-Host "[!] '$filepath' doesn't exist and isn't tracked by git." -ForegroundColor Red
+        Write-Host "Press any key to continue..." -NoNewline
+        [void](Get-WsRawKey)
+        Write-Host ""
+        return
+    }
+    [void](Show-WsFileTimelineScreen -Path $filepath)
+}
+
+function Show-WsWorkspaceExplorer {
+    while ($true) {
+        $items = @(
+            "$($Global:WsGreen)$($Global:WsBold)Changes$($Global:WsReset)  $($Global:WsCyan)- status, diff, revert$($Global:WsReset)",
+            "$($Global:WsGreen)$($Global:WsBold)File Timeline$($Global:WsReset)  $($Global:WsCyan)- full history of one file$($Global:WsReset)",
+            "$($Global:WsGreen)$($Global:WsBold)Project Timeline$($Global:WsReset)  $($Global:WsCyan)- every commit in this repo$($Global:WsReset)"
+        )
+        $helpText = "Up/Down - move    Enter/Right - open    Esc/Left or q - leave the Workspace Explorer"
+
+        $result = Invoke-WsListNavigate -Items $items -Title "WORKSPACE EXPLORER" -Breadcrumb @("Workspace Explorer") `
+            -Markable $false -Filterable $false -HelpText $helpText -ExtraBar "" -ExtraKeys ""
+
+        switch ($result.Result) {
+            "open" {
+                switch ($result.Selected) {
+                    0 { [void](Show-WsChangesScreen) }
+                    1 { Show-WsFileTimelinePickerScreen }
+                    2 { [void](Show-WsProjectTimelineScreen) }
+                }
+            }
+            default {
+                return
+            }
+        }
+    }
 }

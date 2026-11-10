@@ -11,6 +11,7 @@ function Manage-Repo {
     while ($true) {
         Show-Header
         Write-Host "  [+] Module 2: Repository Setup, Status and Reset Engine`n" -ForegroundColor Yellow
+        Write-Host "  [W] $([char]0x2605) Workspace Explorer (status, diff, history, revert)" -ForegroundColor Yellow
         Write-Host "  [1] 1-Click Complete Repo Setup (Init, Main Branch, Commit, Remote, Push)" -ForegroundColor Green
         Write-Host "  [2] 1-Click Complete Repo Destroy" -ForegroundColor Red
         Write-Host "  [3] Quick Push (Add All -> Commit -> Push)" -ForegroundColor Green
@@ -22,9 +23,11 @@ function Manage-Repo {
         Write-Host "  [0] Back to Main Menu" -ForegroundColor Green
         Write-Host "`n====================================================================" -ForegroundColor Cyan
 
-        $choice = Read-Host "Select choice [0-8]"
+        $choice = Read-Host "Select choice [0-8, W]"
 
         switch ($choice) {
+            "w" { Show-WsWorkspaceExplorer }
+            "W" { Show-WsWorkspaceExplorer }
             "1" { Invoke-OneClickRepoSetup }
             "2" { Invoke-OneClickRepoDestroy }
             "3" {

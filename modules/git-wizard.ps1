@@ -148,7 +148,7 @@ $Global:SyncDetailLevel = "standard"  # minimal | standard | full
 $Global:GlobalCliEnabled = $false
 
 # --- Global Function Registration & Debugging ---
-$SubModules = @("identity-engine.ps1", "repo-engine.ps1", "branch-engine.ps1", "commit-engine.ps1", "team-engine.ps1", "vcs-engine.ps1", "toolstack-engine.ps1", "conflict-engine.ps1")
+$SubModules = @("identity-engine.ps1", "repo-engine.ps1", "workspace-engine.ps1", "branch-engine.ps1", "commit-engine.ps1", "team-engine.ps1", "vcs-engine.ps1", "toolstack-engine.ps1", "conflict-engine.ps1")
 $LoadErrors = @()
 
 foreach ($Mod in $SubModules) {

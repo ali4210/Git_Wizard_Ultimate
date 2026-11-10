@@ -71,6 +71,11 @@ UPDATE_REPO=""           # e.g. "ali4210/git-wizard" - set via Settings
 LAST_UPDATE_CHECK=""     # unix timestamp of last update check
 UPDATE_NOTICE=""         # populated by check_for_updates if a newer version exists
 GLOBAL_CLI_ENABLED="false"
+
+# --- Workspace Explorer (Module 2 > [W]): status/diff/history/revert, one screen ---
+# shellcheck source=linux/workspace-explorer.sh
+source "${SCRIPT_DIR}/linux/workspace-explorer.sh"
+
 # ==============================================================================
 # CONFIG PERSISTENCE
 # ==============================================================================
@@ -3122,6 +3127,7 @@ manage_repo() {
     while true; do
         show_header
         echo -e "${YELLOW}${BOLD}[+] Module 2: Repository Setup, Status & Reset Engine${NC}\n"
+        echo -e "  ${YELLOW}${BOLD}[W] ★ Workspace Explorer (status, diff, history, revert)${NC}"
         echo -e "  ${GREEN}[1]${NC} 1-Click Complete Repo Setup"
         echo -e "  ${RED}[2]${NC} 1-Click Complete Repo Destroy"
         echo -e "  ${GREEN}[3]${NC} Quick Push (Add -> Commit -> Push)"
@@ -3135,9 +3141,10 @@ manage_repo() {
         echo -e "      ${CYAN}Enable or disable pre-commit hooks for this repo.${NC}"
         echo -e "  ${GREEN}[0]${NC} Back to Main Menu"
         echo -e "\n===================================================================="
-        read -e -p "Select choice [0-9]: " REPO_CHOICE
+        read -e -p "Select choice [0-9, W]: " REPO_CHOICE
 
         case $REPO_CHOICE in
+            w|W) ws_workspace_explorer ;;
             1) one_click_repo_setup ;;
             2) one_click_repo_destroy ;;
             3)

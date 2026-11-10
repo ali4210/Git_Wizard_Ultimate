@@ -357,17 +357,39 @@ ws_draw_action_bar() {
 # sequence via a short read timeout: a real escape sequence arrives from the
 # terminal as a burst of bytes, while a lone Esc keypress has nothing
 # following it, so a short timeout tells the two apart without ever hanging.
-# Echoes one of: UP DOWN LEFT RIGHT ENTER ESC SPACE SLASH QMARK Q EOF CHAR:<c>
+# Sets WS_LAST_KEY to one of: UP DOWN LEFT RIGHT ENTER ESC SPACE SLASH QMARK
+# Q EOF CHAR:<c>. NOTE: sets a global rather than echoing a return value on
+# purpose — callers must invoke it as a plain statement (`ws_read_key`, then
+# read $WS_LAST_KEY), NEVER as `key=$(ws_read_key)`. Command substitution
+# forks a subshell, and WS_KEY_PUSHBACK below (and the EOF/timeout reads)
+# only works if mutations to it survive across calls in the SAME shell; a
+# subshell would silently discard them every time, reintroducing the exact
+# bug this buffer exists to fix.
+#
+# WS_KEY_PUSHBACK: a one-byte lookahead buffer. Telling a standalone Esc
+# apart from an Esc-prefixed arrow sequence means peeking at the NEXT byte;
+# when that byte turns out NOT to start a sequence ("[") it's a real,
+# independent keypress of its own (commonly: the user pressed Esc twice in
+# a row fast enough that both bytes were already waiting in the input
+# buffer) and must be replayed on the next call, not discarded — otherwise
+# two quick Esc presses silently collapse into one, and any keypress that
+# happens to land right after an Esc can vanish entirely.
 # ------------------------------------------------------------------------------
+WS_KEY_PUSHBACK=""
+WS_LAST_KEY=""
+
 ws_read_key() {
     local k rest final
-    if ! IFS= read -rsn1 k; then
+    if [[ -n "$WS_KEY_PUSHBACK" ]]; then
+        k="$WS_KEY_PUSHBACK"
+        WS_KEY_PUSHBACK=""
+    elif ! IFS= read -rsn1 k; then
         # stdin closed (EOF) rather than a real keypress -- e.g. the
         # process's input was piped and the pipe ended. `read` returns k=""
         # on EOF the same way it does for a real Enter keypress, so without
         # this check the navigator would misread EOF as an endless stream of
         # Enter presses and spin forever instead of exiting cleanly.
-        echo "EOF"
+        WS_LAST_KEY="EOF"
         return 0
     fi
     if [[ "$k" == $'\x1b' ]]; then
@@ -375,30 +397,31 @@ ws_read_key() {
             if [[ "$rest" == "[" ]]; then
                 IFS= read -rsn1 -t 0.05 final
                 case "$final" in
-                    A) echo "UP" ;;
-                    B) echo "DOWN" ;;
-                    C) echo "RIGHT" ;;
-                    D) echo "LEFT" ;;
-                    *) echo "ESC" ;;
+                    A) WS_LAST_KEY="UP" ;;
+                    B) WS_LAST_KEY="DOWN" ;;
+                    C) WS_LAST_KEY="RIGHT" ;;
+                    D) WS_LAST_KEY="LEFT" ;;
+                    *) WS_LAST_KEY="ESC" ;;
                 esac
             else
-                echo "ESC"
+                WS_KEY_PUSHBACK="$rest"
+                WS_LAST_KEY="ESC"
             fi
         else
-            echo "ESC"
+            WS_LAST_KEY="ESC"
         fi
     elif [[ "$k" == "" ]]; then
-        echo "ENTER"
+        WS_LAST_KEY="ENTER"
     elif [[ "$k" == " " ]]; then
-        echo "SPACE"
+        WS_LAST_KEY="SPACE"
     elif [[ "$k" == "/" ]]; then
-        echo "SLASH"
+        WS_LAST_KEY="SLASH"
     elif [[ "$k" == "?" ]]; then
-        echo "QMARK"
+        WS_LAST_KEY="QMARK"
     elif [[ "$k" == "q" || "$k" == "Q" ]]; then
-        echo "Q"
+        WS_LAST_KEY="Q"
     else
-        echo "CHAR:$k"
+        WS_LAST_KEY="CHAR:$k"
     fi
 }
 
@@ -514,7 +537,8 @@ ws_list_navigate() {
             continue
         fi
 
-        key=$(ws_read_key)
+        ws_read_key
+        key="$WS_LAST_KEY"
         case "$key" in
             UP)
                 if [[ ${#visible_idx[@]} -gt 0 ]]; then
@@ -572,6 +596,15 @@ ws_list_navigate() {
                 if [[ -n "$c" && "$WS_NAV_EXTRA_KEYS" == *"$c"* ]]; then
                     tput cnorm 2>/dev/null || true
                     WS_NAV_RESULT="key:${c}"
+                    # Also expose the row under the cursor (ORIGINAL index) at
+                    # the moment the extra key was pressed, same as "open"
+                    # does, so a per-row extra action (e.g. "jump to this
+                    # file's History") knows which row it applies to.
+                    if [[ ${#visible_idx[@]} -gt 0 ]]; then
+                        WS_NAV_SELECTED="${visible_idx[$cursor]}"
+                    else
+                        WS_NAV_SELECTED=-1
+                    fi
                     return 0
                 fi
                 ;;
@@ -605,10 +638,12 @@ ws_list_navigate() {
 # back from.
 # ==============================================================================
 
+WS_LAST_ACTION_KIND=""    # "files" | "commit"
 WS_LAST_ACTION_DESC=""
 WS_LAST_ACTION_BACKUP_DIR=""
 # shellcheck disable=SC2034
-WS_LAST_ACTION_FILES=()   # "sanitized_name|original_path" pairs
+WS_LAST_ACTION_FILES=()   # "sanitized_name|original_path" pairs — kind=files
+WS_LAST_ACTION_TAG=""     # backup tag to reset --hard to — kind=commit
 
 ws_git_dir() {
     git rev-parse --git-dir 2>/dev/null
@@ -689,40 +724,73 @@ ws_restore_file_content() {
     fi
 }
 
-ws_record_last_action() {
+# ws_record_last_action_files <desc> <backup_dir> <"sanitized|path" ...>
+# For worktree/index-level actions (the three revert options, revert-all,
+# revert-marked, apply/restore/undo-file) — undo restores file CONTENT from
+# the backup dir, since a commit tag alone captures nothing about
+# uncommitted content (see the header note on this file's safety layer).
+ws_record_last_action_files() {
     local desc="$1"
     local backup_dir="$2"
     shift 2
+    WS_LAST_ACTION_KIND="files"
     WS_LAST_ACTION_DESC="$desc"
     WS_LAST_ACTION_BACKUP_DIR="$backup_dir"
     WS_LAST_ACTION_FILES=("$@")
+    WS_LAST_ACTION_TAG=""
+    log_action "WORKSPACE EXPLORER: ${desc}"
+}
+
+# ws_record_last_action_commit <desc> <backup_tag>
+# For commit-level actions ("Undo this commit (safe)" / git revert) — undo
+# is a plain `git reset --hard` to the tag create_safety_backup already made,
+# which IS the correct and sufficient recovery for a commit-level change.
+ws_record_last_action_commit() {
+    local desc="$1"
+    local tag="$2"
+    WS_LAST_ACTION_KIND="commit"
+    WS_LAST_ACTION_DESC="$desc"
+    WS_LAST_ACTION_TAG="$tag"
+    WS_LAST_ACTION_BACKUP_DIR=""
+    WS_LAST_ACTION_FILES=()
     log_action "WORKSPACE EXPLORER: ${desc}"
 }
 
 ws_undo_last_action() {
-    if [[ -z "$WS_LAST_ACTION_BACKUP_DIR" ]]; then
+    if [[ -z "$WS_LAST_ACTION_KIND" ]]; then
         echo -e "${YELLOW}[i] Nothing to undo yet.${NC}"
         read -rsn1 -p "Press any key to continue..."
         return
     fi
-    if [[ ! -d "$WS_LAST_ACTION_BACKUP_DIR" ]]; then
+    if [[ "$WS_LAST_ACTION_KIND" == "files" && ! -d "$WS_LAST_ACTION_BACKUP_DIR" ]]; then
         echo -e "${RED}[!] Backup for the last action is missing — cannot undo.${NC}"
+        read -rsn1 -p "Press any key to continue..."
+        return
+    fi
+    if [[ "$WS_LAST_ACTION_KIND" == "commit" ]] && ! git rev-parse -q --verify "$WS_LAST_ACTION_TAG" &>/dev/null; then
+        echo -e "${RED}[!] Backup tag for the last action is missing — cannot undo.${NC}"
         read -rsn1 -p "Press any key to continue..."
         return
     fi
     if confirm_destructive "Undo: ${WS_LAST_ACTION_DESC}"; then
         create_safety_backup "pre-undo"
-        local entry sanitized path
-        for entry in "${WS_LAST_ACTION_FILES[@]}"; do
-            sanitized="${entry%%|*}"
-            path="${entry#*|}"
-            ws_restore_file_content "$path" "$WS_LAST_ACTION_BACKUP_DIR"
-        done
+        if [[ "$WS_LAST_ACTION_KIND" == "commit" ]]; then
+            run_git reset --hard "$WS_LAST_ACTION_TAG"
+        else
+            local entry sanitized path
+            for entry in "${WS_LAST_ACTION_FILES[@]}"; do
+                sanitized="${entry%%|*}"
+                path="${entry#*|}"
+                ws_restore_file_content "$path" "$WS_LAST_ACTION_BACKUP_DIR"
+            done
+        fi
         log_action "UNDO: ${WS_LAST_ACTION_DESC}"
         echo -e "${GREEN}[✔] Undone: ${WS_LAST_ACTION_DESC}${NC}"
+        WS_LAST_ACTION_KIND=""
         WS_LAST_ACTION_DESC=""
         WS_LAST_ACTION_BACKUP_DIR=""
         WS_LAST_ACTION_FILES=()
+        WS_LAST_ACTION_TAG=""
         read -rsn1 -p "Press any key to continue..."
     fi
 }
@@ -741,6 +809,8 @@ ws_detect_in_progress_operation() {
         echo "merge"
     elif [[ -f "${gd}/CHERRY_PICK_HEAD" ]]; then
         echo "cherry-pick"
+    elif [[ -f "${gd}/REVERT_HEAD" ]]; then
+        echo "revert"
     elif [[ -d "${gd}/rebase-merge" || -d "${gd}/rebase-apply" ]]; then
         echo "rebase"
     else
@@ -754,9 +824,10 @@ ws_abort_in_progress_operation() {
     case "$kind" in
         merge) run_git merge --abort ;;
         cherry-pick) run_git cherry-pick --abort ;;
+        revert) run_git revert --abort ;;
         rebase) run_git rebase --abort ;;
         *)
-            echo -e "${YELLOW}[i] No merge, rebase, or cherry-pick currently in progress.${NC}"
+            echo -e "${YELLOW}[i] No merge, rebase, revert, or cherry-pick currently in progress.${NC}"
             return 1
             ;;
     esac
@@ -826,7 +897,8 @@ ws_scroll_view() {
         [[ -n "$WS_SCROLL_EXTRA_BAR" ]] && bar="${bar}\n${WS_SCROLL_EXTRA_BAR}"
         ws_draw_action_bar "$bar"
 
-        key=$(ws_read_key)
+        ws_read_key
+        key="$WS_LAST_KEY"
         case "$key" in
             UP) ((offset--)) || true; [[ $offset -lt 0 ]] && offset=0 ;;
             DOWN) ((offset++)) || true ;;
@@ -897,7 +969,8 @@ Esc or Left - leave the Workspace Explorer    Space - mark a file
 / - filter the list by typing part of a filename    q - quit the Explorer
 R - revert ALL tracked changes to last commit (untracked files are never touched)
 M - revert only the MARKED files to last commit
-U - undo the last Explorer action (restores the files it changed)"
+U - undo the last Explorer action (restores the files it changed)
+H - this file's full commit history (File Timeline)"
 
 # ------------------------------------------------------------------------------
 # ws_changes_screen — Screen 1: the git-status view, and entry point for the
@@ -919,10 +992,10 @@ ws_changes_screen() {
         WS_NAV_MARKABLE="true"
         WS_NAV_FILTERABLE="true"
         WS_NAV_HELP_TEXT="$WS_CHANGES_HELP_TEXT"
-        WS_NAV_EXTRA_KEYS="RMU"
+        WS_NAV_EXTRA_KEYS="RMUH"
         local undo_hint=""
-        [[ -n "$WS_LAST_ACTION_BACKUP_DIR" ]] && undo_hint="  ${CYAN}[U]${NC} Undo: ${WS_LAST_ACTION_DESC}"
-        WS_NAV_EXTRA_BAR="${CYAN}[R]${NC} Revert all  ${CYAN}[M]${NC} Revert marked${undo_hint}"
+        [[ -n "$WS_LAST_ACTION_KIND" ]] && undo_hint="  ${CYAN}[U]${NC} Undo: ${WS_LAST_ACTION_DESC}"
+        WS_NAV_EXTRA_BAR="${CYAN}[R]${NC} Revert all  ${CYAN}[M]${NC} Revert marked  ${CYAN}[H]${NC} File Timeline${undo_hint}"
         WS_NAV_MARKED_INDICES=("${nav_marked[@]}")
 
         ws_list_navigate
@@ -948,6 +1021,11 @@ ws_changes_screen() {
                 ;;
             key:U)
                 ws_undo_last_action
+                ;;
+            key:H)
+                if [[ "$WS_NAV_SELECTED" -ge 0 ]]; then
+                    ws_file_timeline_screen "${WS_STATUS_PATH[$WS_NAV_SELECTED]}" || { tput cnorm 2>/dev/null || true; return 0; }
+                fi
                 ;;
             back|quit|*)
                 tput cnorm 2>/dev/null || true
@@ -996,7 +1074,7 @@ ws_changes_revert_all() {
         files_for_journal+=("${sanitized}|${path}")
         run_git restore --source=HEAD --staged --worktree -- "$path"
     done
-    ws_record_last_action "Revert all (${#targets[@]} file(s)) to last commit" "$backup_dir" "${files_for_journal[@]}"
+    ws_record_last_action_files "Revert all (${#targets[@]} file(s)) to last commit" "$backup_dir" "${files_for_journal[@]}"
     echo -e "${GREEN}[✔] Reverted ${#targets[@]} file(s).${NC}"
     read -rsn1 -p "Press any key to continue..."
 }
@@ -1054,7 +1132,7 @@ ws_changes_revert_marked() {
         files_for_journal+=("${sanitized}|${path}")
         run_git restore --source=HEAD --staged --worktree -- "$path"
     done
-    ws_record_last_action "Revert marked (${#targets[@]} file(s)) to last commit" "$backup_dir" "${files_for_journal[@]}"
+    ws_record_last_action_files "Revert marked (${#targets[@]} file(s)) to last commit" "$backup_dir" "${files_for_journal[@]}"
     echo -e "${GREEN}[✔] Reverted ${#targets[@]} marked file(s).${NC}"
     read -rsn1 -p "Press any key to continue..."
 }
@@ -1257,8 +1335,452 @@ ws_perform_single_revert() {
         return 1
     fi
 
-    ws_record_last_action "Revert '${path}' to ${label}" "$backup_dir" "${sanitized}|${path}"
+    ws_record_last_action_files "Revert '${path}' to ${label}" "$backup_dir" "${sanitized}|${path}"
     echo -e "${GREEN}[✔] Reverted.${NC}"
     read -rsn1 -p "Press any key to continue..."
     return 0
+}
+
+# ==============================================================================
+# STAGE 4 OF 6: FILE TIMELINE — all commits touching one file (git log
+# --follow), paged ~50 at a time; a commit's change to that file; and the
+# four commit actions (Apply / Restore file / Undo file change / Undo commit
+# safely). Screen 5 (Project Timeline) reuses ws_commit_list_screen and
+# ws_commit_detail_actions_bar below, per the original spec's "reusing the
+# same commit-detail code" instruction.
+# ==============================================================================
+
+ws_format_commit_row() {
+    local hash="$1" author="$2" date="$3" subject="$4"
+    echo -e "${CYAN}${BOLD}${hash:0:8}${NC}  ${GREEN}${author}${NC}  ${YELLOW}${date}${NC}  ${subject}"
+}
+
+# ------------------------------------------------------------------------------
+# ws_commit_list_screen — generic paged commit browser shared by File
+# Timeline and Project Timeline.
+#
+# INPUTS:
+#   WS_CL_FETCH_FN    name of a function taking (limit, skip) that echoes
+#                     "hash\x1fauthor\x1fdate\x1fsubject" lines
+#   WS_CL_COUNT_FN    name of a function taking no args that echoes the
+#                     total commit count
+#   WS_CL_TITLE       title text (page/total appended automatically)
+#   WS_CL_BREADCRUMB  array
+#   WS_CL_PAGE_SIZE   commits per page (default 50)
+#
+# OUTPUT:
+#   WS_CL_RESULT          "open" | "back" | "quit"
+#   WS_CL_SELECTED_HASH / _AUTHOR / _DATE / _SUBJECT  (when result == "open")
+# ------------------------------------------------------------------------------
+ws_commit_list_screen() {
+    local page=0
+    local page_size="${WS_CL_PAGE_SIZE:-50}"
+
+    while true; do
+        local total
+        total=$("$WS_CL_COUNT_FN")
+        [[ -z "$total" ]] && total=0
+
+        local total_pages=$(( (total + page_size - 1) / page_size ))
+        [[ $total_pages -lt 1 ]] && total_pages=1
+        if [[ $page -ge $total_pages ]]; then
+            page=$(( total_pages - 1 ))
+        fi
+        [[ $page -lt 0 ]] && page=0
+        local skip=$((page * page_size))
+
+        local -a hashes=() authors=() dates=() subjects=()
+        WS_NAV_ITEMS=()
+        while IFS=$'\x1f' read -r h a d s; do
+            [[ -z "$h" ]] && continue
+            hashes+=("$h")
+            authors+=("$a")
+            dates+=("$d")
+            subjects+=("$s")
+            WS_NAV_ITEMS+=("$(ws_format_commit_row "$h" "$a" "$d" "$s")")
+        done < <("$WS_CL_FETCH_FN" "$page_size" "$skip")
+
+        WS_BREADCRUMB=("${WS_CL_BREADCRUMB[@]}")
+        WS_NAV_TITLE="${WS_CL_TITLE}  (page $((page + 1))/${total_pages}, ${total} commit(s) total)"
+        WS_NAV_MARKABLE="false"
+        WS_NAV_FILTERABLE="true"
+        WS_NAV_HELP_TEXT="Up/Down - move    Enter/Right - view this commit    Esc/Left - back
+/ - filter by author/date/message    N - next page    P - previous page    q - quit the Explorer"
+
+        local extra="" bar=""
+        if [[ $((page + 1)) -lt $total_pages ]]; then
+            extra="N"
+            bar="${CYAN}[N]${NC} Next page"
+        fi
+        if [[ $page -gt 0 ]]; then
+            extra="${extra}P"
+            [[ -n "$bar" ]] && bar="${bar}  "
+            bar="${bar}${CYAN}[P]${NC} Previous page"
+        fi
+        WS_NAV_EXTRA_KEYS="$extra"
+        WS_NAV_EXTRA_BAR="$bar"
+        WS_NAV_MARKED_INDICES=()
+
+        ws_list_navigate
+
+        case "$WS_NAV_RESULT" in
+            open)
+                WS_CL_RESULT="open"
+                WS_CL_SELECTED_HASH="${hashes[$WS_NAV_SELECTED]}"
+                WS_CL_SELECTED_AUTHOR="${authors[$WS_NAV_SELECTED]}"
+                WS_CL_SELECTED_DATE="${dates[$WS_NAV_SELECTED]}"
+                WS_CL_SELECTED_SUBJECT="${subjects[$WS_NAV_SELECTED]}"
+                return 0
+                ;;
+            key:N)
+                ((page++)) || true
+                ;;
+            key:P)
+                ((page--)) || true
+                [[ $page -lt 0 ]] && page=0
+                ;;
+            back|quit|*)
+                WS_CL_RESULT="$WS_NAV_RESULT"
+                return 0
+                ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------------------------
+# ws_perform_commit_file_action <path> <hash> <label> <action fn taking hash,path>
+# Shared confirm + file-content-backup + journal wrapper for the File
+# Timeline's Apply / Restore file / Undo file change actions — all three
+# rewrite WORKING-TREE content for one file, same as Stage 3's revert
+# options, so they need the same file-content backup (not just a HEAD tag)
+# to be undoable.
+# ------------------------------------------------------------------------------
+ws_perform_commit_file_action() {
+    local path="$1"
+    local hash="$2"
+    local label="$3"
+    local fn="$4"
+
+    ws_show_header
+    ws_draw_breadcrumb
+    echo -e "${YELLOW}${BOLD}${label}${NC}\n"
+    if ! confirm_destructive "${label}: '${path}' at commit ${hash:0:8}"; then
+        return 1
+    fi
+
+    local ts backup_dir sanitized
+    ts=$(date '+%Y%m%d-%H%M%S')
+    backup_dir="$(ws_git_dir)/wizard-backups/commit-action-${ts}"
+    sanitized=$(ws_backup_file_content "$path" "$backup_dir")
+
+    local out
+    out=$("$fn" "$hash" "$path" 2>&1)
+    local rc=$?
+
+    ws_record_last_action_files "${label}: '${path}' at ${hash:0:8}" "$backup_dir" "${sanitized}|${path}"
+
+    if [[ $rc -ne 0 ]] || echo "$out" | grep -q '^<<<<<<<\|^CONFLICT\|^Applied patch.*with conflicts'; then
+        echo -e "${RED}[!] This didn't apply cleanly — '${path}' may now contain conflict markers.${NC}"
+        echo -e "${YELLOW}    Use [U] Undo last action on the Changes screen to put it back exactly as it was.${NC}"
+        [[ -n "$out" ]] && echo -e "\n${out}"
+    else
+        echo -e "${GREEN}[✔] Done.${NC}"
+    fi
+    read -rsn1 -p "Press any key to continue..."
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# ws_perform_commit_revert_safe <hash> <subject>
+# "Undo this commit (safe)" — a COMMIT-level action (git revert creates a
+# new commit), so the HEAD tag create_safety_backup makes IS the correct and
+# sufficient undo mechanism here (undo = reset --hard to that tag), unlike
+# the worktree-level actions above. Detects and offers to abort a revert
+# conflict the same way the Changes screen handles a merge conflict.
+# ------------------------------------------------------------------------------
+ws_perform_commit_revert_safe() {
+    local hash="$1"
+    local subject="$2"
+
+    ws_show_header
+    ws_draw_breadcrumb
+    echo -e "${YELLOW}${BOLD}UNDO THIS COMMIT (safe revert)${NC}\n"
+    echo -e "Commit ${CYAN}${hash:0:8}${NC}: ${subject}\n"
+    if ! confirm_destructive "Create a new commit that undoes ${hash:0:8} (\"${subject}\")"; then
+        return 1
+    fi
+
+    local ts tag
+    ts=$(date '+%Y%m%d-%H%M%S')
+    tag="backup/pre-revert-commit-${ts}"
+    if git rev-parse HEAD &>/dev/null && [[ "$DRY_RUN" != "true" ]]; then
+        git tag "$tag" HEAD 2>/dev/null || true
+    fi
+    create_safety_backup "pre-revert-commit"
+
+    if ws_revert_commit_safe "$hash"; then
+        ws_record_last_action_commit "Undo commit ${hash:0:8} (\"${subject}\")" "$tag"
+        echo -e "${GREEN}[✔] Commit undone with a new revert commit.${NC}"
+        read -rsn1 -p "Press any key to continue..."
+        return 0
+    fi
+
+    local kind
+    kind=$(ws_detect_in_progress_operation)
+    if [[ "$kind" == "revert" ]]; then
+        echo -e "${RED}[!] The revert hit a conflict and is still in progress.${NC}"
+        echo -e "${YELLOW}    Conflicted file(s):${NC}"
+        git diff --name-only --diff-filter=U 2>/dev/null | sed 's/^/      /'
+        echo ""
+        echo -e "  ${RED}[A]${NC} Abort the revert (discards it, returns to the pre-revert state)"
+        echo -e "  ${YELLOW}[Esc]${NC} Leave it — resolve the conflict manually, then commit"
+        read -rsn1 -p "Choice: " kchoice
+        if [[ "$kchoice" == "a" || "$kchoice" == "A" ]]; then
+            if confirm_destructive "Abort the in-progress revert"; then
+                run_git revert --abort
+                echo -e "${GREEN}[✔] Aborted.${NC}"
+            fi
+        fi
+    else
+        echo -e "${RED}[!] Revert failed — the working tree may have uncommitted changes to a file this commit touched.${NC}"
+    fi
+    read -rsn1 -p "Press any key to continue..."
+    return 0
+}
+
+_ws_file_timeline_fetch() { ws_file_log "$WS_TIMELINE_PATH" "$1" "$2"; }
+_ws_file_timeline_count() { ws_file_log_count "$WS_TIMELINE_PATH"; }
+
+# ------------------------------------------------------------------------------
+# ws_file_timeline_screen <path> — Screen 2: all commits touching this file.
+# Returns 1 if the user quit the whole Explorer from here, 0 otherwise.
+# ------------------------------------------------------------------------------
+ws_file_timeline_screen() {
+    local path="$1"
+    WS_TIMELINE_PATH="$path"
+
+    while true; do
+        WS_CL_FETCH_FN="_ws_file_timeline_fetch"
+        WS_CL_COUNT_FN="_ws_file_timeline_count"
+        WS_CL_TITLE="📜 FILE TIMELINE"
+        WS_CL_BREADCRUMB=("Changes" "$path" "History")
+        WS_CL_PAGE_SIZE=50
+
+        ws_commit_list_screen
+
+        case "$WS_CL_RESULT" in
+            open)
+                ws_file_timeline_commit_screen "$path" "$WS_CL_SELECTED_HASH" "$WS_CL_SELECTED_SUBJECT" || return 1
+                ;;
+            quit)
+                return 1
+                ;;
+            back|*)
+                return 0
+                ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------------------------
+# ws_file_timeline_commit_screen <path> <hash> <subject> — that commit's
+# change to this one file, plus the four File Timeline actions.
+# Returns 1 if the user quit the whole Explorer from here, 0 otherwise.
+# ------------------------------------------------------------------------------
+ws_file_timeline_commit_screen() {
+    local path="$1"
+    local hash="$2"
+    local subject="$3"
+
+    while true; do
+        WS_BREADCRUMB=("Changes" "$path" "History" "${hash:0:8}")
+
+        local body
+        if ws_is_binary_file "$path"; then
+            body="${YELLOW}(binary file at this commit — diff not shown)${NC}"
+        else
+            body=$(ws_render_diff "$(ws_commit_file_diff "$hash" "$path")")
+            [[ -z "$body" ]] && body="${CYAN}(no change to this file in this commit)${NC}"
+        fi
+        WS_SCROLL_CONTENT="$body"
+        WS_SCROLL_EXTRA_BAR="${CYAN}[A]${NC} Apply to current  ${CYAN}[F]${NC} Restore file to this commit  ${CYAN}[U]${NC} Undo only this file's change  ${CYAN}[C]${NC} Undo this commit (safe)"
+        WS_SCROLL_EXTRA_KEYS="AFUC"
+        WS_SCROLL_HELP_TEXT="Up/Down - scroll    Esc/Left - back to this file's timeline
+A - apply this historical change to your current file
+F - restore the file to exactly how it looked at this commit
+U - undo only this commit's change to this one file (reverse-apply)
+C - undo the WHOLE commit safely (git revert — affects every file it touched)"
+
+        ws_scroll_view
+        case "$WS_SCROLL_RESULT" in
+            key:A)
+                ws_perform_commit_file_action "$path" "$hash" "Apply this change to current version" ws_apply_commit_file_to_current
+                ;;
+            key:F)
+                ws_perform_commit_file_action "$path" "$hash" "Restore file to how it was at this commit" ws_restore_file_to_commit
+                ;;
+            key:U)
+                ws_perform_commit_file_action "$path" "$hash" "Undo only this file's change in this commit" ws_undo_file_change_in_commit
+                ;;
+            key:C)
+                ws_perform_commit_revert_safe "$hash" "$subject"
+                return 0
+                ;;
+            quit)
+                return 1
+                ;;
+            back|*)
+                return 0
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# STAGE 5 OF 6: PROJECT TIMELINE — all repo commits, paged ~50 at a time.
+# Enter shows message/stats/files touched; Enter on a file reuses
+# ws_file_timeline_commit_screen from Stage 4 verbatim (same actions, same
+# code), per the original spec's "Same actions as the File Timeline, reusing
+# the same commit-detail code" instruction.
+# ==============================================================================
+
+_ws_project_timeline_fetch() { ws_project_log "$1" "$2"; }
+_ws_project_timeline_count() { ws_project_log_count; }
+
+# ------------------------------------------------------------------------------
+# ws_project_timeline_screen — Screen 3: all repo commits.
+# Returns 1 if the user quit the whole Explorer from here, 0 otherwise.
+# ------------------------------------------------------------------------------
+ws_project_timeline_screen() {
+    while true; do
+        WS_CL_FETCH_FN="_ws_project_timeline_fetch"
+        WS_CL_COUNT_FN="_ws_project_timeline_count"
+        WS_CL_TITLE="🕒 PROJECT TIMELINE"
+        WS_CL_BREADCRUMB=("Project Timeline")
+        WS_CL_PAGE_SIZE=50
+
+        ws_commit_list_screen
+
+        case "$WS_CL_RESULT" in
+            open)
+                ws_project_commit_detail_screen "$WS_CL_SELECTED_HASH" "$WS_CL_SELECTED_SUBJECT" || return 1
+                ;;
+            quit)
+                return 1
+                ;;
+            back|*)
+                return 0
+                ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------------------------
+# ws_project_commit_detail_screen <hash> <subject> — message, stats, and the
+# list of files this commit touched; Enter on a file reuses
+# ws_file_timeline_commit_screen (Stage 4) for that file's change in this
+# commit, with the same Apply/Restore/Undo-file/Undo-commit actions.
+# ------------------------------------------------------------------------------
+ws_project_commit_detail_screen() {
+    local hash="$1"
+    local subject="$2"
+
+    while true; do
+        local -a files=()
+        WS_NAV_ITEMS=()
+        while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            files+=("$f")
+            WS_NAV_ITEMS+=("$(echo -e "${CYAN}${f}${NC}")")
+        done < <(ws_commit_files "$hash")
+
+        WS_BREADCRUMB=("Project Timeline" "${hash:0:8}")
+        WS_NAV_TITLE="$(ws_commit_summary "$hash")
+
+${YELLOW}${BOLD}FILES TOUCHED (${#files[@]})${NC}"
+        WS_NAV_MARKABLE="false"
+        WS_NAV_FILTERABLE="true"
+        WS_NAV_HELP_TEXT="Up/Down - move    Enter/Right - view this file's change in this commit
+Esc/Left - back to Project Timeline    / - filter by filename    q - quit the Explorer"
+        WS_NAV_EXTRA_KEYS=""
+        WS_NAV_EXTRA_BAR=""
+        WS_NAV_MARKED_INDICES=()
+
+        ws_list_navigate
+
+        case "$WS_NAV_RESULT" in
+            open)
+                ws_file_timeline_commit_screen "${files[$WS_NAV_SELECTED]}" "$hash" "$subject" || return 1
+                ;;
+            quit)
+                return 1
+                ;;
+            back|*)
+                return 0
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# STAGE 6 OF 6: TOP-LEVEL ENTRY SCREEN — the home screen the Module 2 menu
+# entry opens. Changes, File Timeline (via a file you pick here), and
+# Project Timeline are all reachable from it.
+#
+# A NOTE ON "q": every sub-screen's own "quit" result just returns to THIS
+# home screen (not all the way out of the tool) — only pressing q/Esc HERE,
+# at the home screen itself, actually leaves the Explorer and returns to the
+# Module 2 menu. This needed no changes to any of Stages 1-5: this screen is
+# a thin additive wrapper on top of them.
+# ==============================================================================
+ws_workspace_explorer_pick_file_timeline() {
+    ws_show_header
+    ws_draw_breadcrumb
+    echo -e "${YELLOW}${BOLD}FILE TIMELINE${NC}\n"
+    echo -e "${CYAN}Enter the path to a tracked file (relative to the repo root, tab-completes).${NC}"
+    local filepath
+    read -e -r -p "File path (ENTER with nothing to cancel): " filepath
+    if [[ -z "$filepath" ]]; then
+        return
+    fi
+    if ! git ls-files --error-unmatch -- "$filepath" &>/dev/null && [[ ! -e "$filepath" ]]; then
+        echo -e "${RED}[!] '${filepath}' doesn't exist and isn't tracked by git.${NC}"
+        read -rsn1 -p "Press any key to continue..."
+        return
+    fi
+    ws_file_timeline_screen "$filepath"
+}
+
+ws_workspace_explorer() {
+    while true; do
+        WS_BREADCRUMB=("Workspace Explorer")
+        WS_NAV_ITEMS=(
+            "$(echo -e "${GREEN}${BOLD}📂 Changes${NC}  ${CYAN}— status, diff, revert${NC}")"
+            "$(echo -e "${GREEN}${BOLD}📜 File Timeline${NC}  ${CYAN}— full history of one file${NC}")"
+            "$(echo -e "${GREEN}${BOLD}🕒 Project Timeline${NC}  ${CYAN}— every commit in this repo${NC}")"
+        )
+        WS_NAV_TITLE="🧙 WORKSPACE EXPLORER"
+        WS_NAV_MARKABLE="false"
+        WS_NAV_FILTERABLE="false"
+        WS_NAV_HELP_TEXT="Up/Down - move    Enter/Right - open    Esc/Left or q - leave the Workspace Explorer"
+        WS_NAV_EXTRA_KEYS=""
+        WS_NAV_EXTRA_BAR=""
+        WS_NAV_MARKED_INDICES=()
+
+        ws_list_navigate
+
+        case "$WS_NAV_RESULT" in
+            open)
+                case "$WS_NAV_SELECTED" in
+                    0) ws_changes_screen ;;
+                    1) ws_workspace_explorer_pick_file_timeline ;;
+                    2) ws_project_timeline_screen ;;
+                esac
+                ;;
+            back|quit|*)
+                tput cnorm 2>/dev/null || true
+                return 0
+                ;;
+        esac
+    done
 }
