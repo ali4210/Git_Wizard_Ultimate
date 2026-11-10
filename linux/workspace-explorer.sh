@@ -379,7 +379,7 @@ WS_KEY_PUSHBACK=""
 WS_LAST_KEY=""
 
 ws_read_key() {
-    local k rest final
+    local k rest
     if [[ -n "$WS_KEY_PUSHBACK" ]]; then
         k="$WS_KEY_PUSHBACK"
         WS_KEY_PUSHBACK=""
@@ -395,12 +395,27 @@ ws_read_key() {
     if [[ "$k" == $'\x1b' ]]; then
         if IFS= read -rsn1 -t 0.05 rest; then
             if [[ "$rest" == "[" ]]; then
-                IFS= read -rsn1 -t 0.05 final
-                case "$final" in
+                # Arrow keys end in a single letter (A/B/C/D). Home/End/
+                # PageUp/PageDown vary by terminal: either a single letter
+                # (H/F) or one-or-more digits followed by '~' (xterm/vt220
+                # style: 1~/7~=Home, 4~/8~=End, 5~=PageUp, 6~=PageDown).
+                # Read until we hit a letter or '~', accumulating digits.
+                local seq="" c
+                while IFS= read -rsn1 -t 0.05 c; do
+                    seq+="$c"
+                    [[ "$c" == [A-Za-z~] ]] && break
+                done
+                case "$seq" in
                     A) WS_LAST_KEY="UP" ;;
                     B) WS_LAST_KEY="DOWN" ;;
                     C) WS_LAST_KEY="RIGHT" ;;
                     D) WS_LAST_KEY="LEFT" ;;
+                    H) WS_LAST_KEY="HOME" ;;
+                    F) WS_LAST_KEY="END" ;;
+                    1~|7~) WS_LAST_KEY="HOME" ;;
+                    4~|8~) WS_LAST_KEY="END" ;;
+                    5~) WS_LAST_KEY="PGUP" ;;
+                    6~) WS_LAST_KEY="PGDN" ;;
                     *) WS_LAST_KEY="ESC" ;;
                 esac
             else
@@ -445,28 +460,74 @@ ws_read_key() {
 #                          like Revert-all/Revert-Marked/Undo); any other
 #                          unrecognized character is silently ignored
 #
+# OPTIONAL INPUTS (all default to the prior, unchanged behavior when a
+# caller never sets them — existing screens need no changes):
+#   WS_NAV_VIEWPORT          "true" to clip rendering to the terminal height
+#                            and scroll (Up/Down/PgUp/PgDn/Home/End move a
+#                            viewport window) instead of printing every item
+#                            every redraw. Default "false": every item is
+#                            printed unconditionally, exactly as before —
+#                            needed for large lists (hundreds-thousands of
+#                            files), overkill and visually unchanged for the
+#                            short lists every existing screen uses.
+#   WS_NAV_CASE_INSENSITIVE  "true" for a case-insensitive "/" filter.
+#                            Default "false" (existing exact-match behavior).
+#   WS_NAV_INITIAL_CURSOR    an ORIGINAL index to start the cursor on, or
+#                            unset/-1 for the default (top of the list).
+#   WS_NAV_INITIAL_FILTER    filter text to pre-apply on entry, or unset/""
+#                            for none. Lets a caller restore where the user
+#                            was after a round trip into a sub-screen.
+#   WS_NAV_ITEM_NOUN         noun used in the viewport's live count line
+#                            (e.g. "files"); default "items".
+#
 # OUTPUTS (set on return):
 #   WS_NAV_RESULT          "open" | "back" | "quit" | "key:<c>" (one of
 #                          WS_NAV_EXTRA_KEYS was pressed)
 #   WS_NAV_SELECTED        index into WS_NAV_ITEMS (ORIGINAL, unfiltered)
 #   WS_NAV_MARKED_INDICES  updated in place as the user presses Space
+#   WS_NAV_LAST_FILTER     the filter text in effect when the screen was
+#                          left (for a caller that wants to restore it via
+#                          WS_NAV_INITIAL_FILTER on the next call)
 # ------------------------------------------------------------------------------
 ws_list_navigate() {
     local cursor=0
-    local filter_text=""
+    local filter_text="${WS_NAV_INITIAL_FILTER:-}"
     local filter_mode="false"
     local -a visible_idx=()
     local i m row vi marker key
+    local viewport="${WS_NAV_VIEWPORT:-false}"
+    local ci="${WS_NAV_CASE_INSENSITIVE:-false}"
+    local view_offset=0
 
     _ws_nav_rebuild_visible() {
         visible_idx=()
+        local needle="$filter_text"
+        [[ "$ci" == "true" ]] && needle="${needle,,}"
         for i in "${!WS_NAV_ITEMS[@]}"; do
-            if [[ -z "$filter_text" ]] || [[ "${WS_NAV_ITEMS[$i]}" == *"$filter_text"* ]]; then
+            if [[ -z "$filter_text" ]]; then
+                visible_idx+=("$i")
+            elif [[ "$ci" == "true" ]]; then
+                local hay="${WS_NAV_ITEMS[$i],,}"
+                [[ "$hay" == *"$needle"* ]] && visible_idx+=("$i")
+            elif [[ "${WS_NAV_ITEMS[$i]}" == *"$filter_text"* ]]; then
                 visible_idx+=("$i")
             fi
         done
     }
     _ws_nav_rebuild_visible
+
+    # Resolve an optional starting cursor (an ORIGINAL index) to its row in
+    # the (possibly filtered) visible list, so a caller can restore where
+    # the user was after a round trip into a sub-screen. Falls back to the
+    # top of the list if that index is gone or wasn't requested.
+    if [[ -n "${WS_NAV_INITIAL_CURSOR:-}" && "${WS_NAV_INITIAL_CURSOR}" -ge 0 ]] 2>/dev/null; then
+        for row in "${!visible_idx[@]}"; do
+            if [[ "${visible_idx[$row]}" == "$WS_NAV_INITIAL_CURSOR" ]]; then
+                cursor=$row
+                break
+            fi
+        done
+    fi
 
     tput civis 2>/dev/null || true
     while true; do
@@ -478,6 +539,11 @@ ws_list_navigate() {
             cursor=0
         fi
 
+        local rows visible_rows
+        rows=$(tput lines 2>/dev/null || echo 24)
+        visible_rows=$((rows - 10))
+        [[ $visible_rows -lt 3 ]] && visible_rows=3
+
         ws_show_header
         ws_draw_breadcrumb
         echo -e "${YELLOW}${BOLD}${WS_NAV_TITLE}${NC}\n"
@@ -488,6 +554,50 @@ ws_list_navigate() {
             else
                 echo -e "${CYAN}(nothing here)${NC}"
             fi
+        elif [[ "$viewport" == "true" ]]; then
+            # Opt-in only (see header note) — clip rendering to the terminal
+            # height and keep the cursor in view, instead of printing every
+            # item every redraw. Everything below is skipped entirely for
+            # existing callers (Changes, File/Project Timeline), which never
+            # set WS_NAV_VIEWPORT, so their rendering is byte-for-byte the
+            # same as before this was added.
+            local total=${#visible_idx[@]}
+            if [[ $cursor -lt $view_offset ]]; then view_offset=$cursor; fi
+            if [[ $cursor -ge $((view_offset + visible_rows)) ]]; then
+                view_offset=$((cursor - visible_rows + 1))
+            fi
+            [[ $view_offset -lt 0 ]] && view_offset=0
+            if [[ $((view_offset + visible_rows)) -gt $total ]]; then
+                view_offset=$((total - visible_rows))
+                [[ $view_offset -lt 0 ]] && view_offset=0
+            fi
+
+            local shown=0
+            for ((row = view_offset; row < total && shown < visible_rows; row++)); do
+                vi="${visible_idx[$row]}"
+                marker="  "
+                for m in "${WS_NAV_MARKED_INDICES[@]}"; do
+                    [[ "$m" == "$vi" ]] && marker="${GREEN}${BOLD}*${NC} "
+                done
+                if [[ $row -eq $cursor ]]; then
+                    echo -e "${marker}${GREEN}${BOLD}➔ ${WS_NAV_ITEMS[$vi]}${NC}"
+                else
+                    echo -e "${marker}  ${WS_NAV_ITEMS[$vi]}"
+                fi
+                ((shown++))
+            done
+            local noun="${WS_NAV_ITEM_NOUN:-items}"
+            local unfiltered_total=${#WS_NAV_ITEMS[@]}
+            local count_text
+            if [[ $total -ne $unfiltered_total ]]; then
+                count_text="${total} of ${unfiltered_total} ${noun}"
+            else
+                count_text="${total} ${noun}"
+            fi
+            if [[ $total -gt $visible_rows ]]; then
+                count_text="${count_text}  (showing $((view_offset + 1))-$((view_offset + shown)))"
+            fi
+            echo -e "\n${CYAN}${count_text}${NC}"
         else
             for row in "${!visible_idx[@]}"; do
                 vi="${visible_idx[$row]}"
@@ -511,6 +621,7 @@ ws_list_navigate() {
         local bar="${CYAN}[↑↓]${NC} Move  ${CYAN}[Enter/→]${NC} Open  ${CYAN}[Esc/←]${NC} Back"
         [[ "$WS_NAV_MARKABLE" == "true" ]] && bar="${bar}  ${CYAN}[Space]${NC} Mark"
         [[ "$WS_NAV_FILTERABLE" == "true" ]] && bar="${bar}  ${CYAN}[/]${NC} Filter"
+        [[ "$viewport" == "true" ]] && bar="${bar}  ${CYAN}[PgUp/PgDn/Home/End]${NC} Scroll"
         bar="${bar}  ${CYAN}[?]${NC} Help  ${CYAN}[q]${NC} Quit"
         [[ -n "$WS_NAV_EXTRA_BAR" ]] && bar="${bar}\n${WS_NAV_EXTRA_BAR}"
         ws_draw_action_bar "$bar"
@@ -552,17 +663,35 @@ ws_list_navigate() {
                     [[ $cursor -ge ${#visible_idx[@]} ]] && cursor=0
                 fi
                 ;;
+            HOME)
+                cursor=0
+                ;;
+            END)
+                [[ ${#visible_idx[@]} -gt 0 ]] && cursor=$(( ${#visible_idx[@]} - 1 ))
+                ;;
+            PGUP)
+                ((cursor -= visible_rows)) || true
+                [[ $cursor -lt 0 ]] && cursor=0
+                ;;
+            PGDN)
+                ((cursor += visible_rows)) || true
+                if [[ ${#visible_idx[@]} -gt 0 && $cursor -ge ${#visible_idx[@]} ]]; then
+                    cursor=$(( ${#visible_idx[@]} - 1 ))
+                fi
+                ;;
             ENTER|RIGHT)
                 if [[ ${#visible_idx[@]} -gt 0 ]]; then
                     tput cnorm 2>/dev/null || true
                     WS_NAV_RESULT="open"
                     WS_NAV_SELECTED="${visible_idx[$cursor]}"
+                    WS_NAV_LAST_FILTER="$filter_text"
                     return 0
                 fi
                 ;;
             ESC|LEFT)
                 tput cnorm 2>/dev/null || true
                 WS_NAV_RESULT="back"
+                WS_NAV_LAST_FILTER="$filter_text"
                 return 0
                 ;;
             SPACE)
@@ -589,6 +718,7 @@ ws_list_navigate() {
             Q)
                 tput cnorm 2>/dev/null || true
                 WS_NAV_RESULT="quit"
+                WS_NAV_LAST_FILTER="$filter_text"
                 return 0
                 ;;
             CHAR:*)
@@ -605,12 +735,14 @@ ws_list_navigate() {
                     else
                         WS_NAV_SELECTED=-1
                     fi
+                    WS_NAV_LAST_FILTER="$filter_text"
                     return 0
                 fi
                 ;;
             EOF)
                 tput cnorm 2>/dev/null || true
                 WS_NAV_RESULT="quit"
+                WS_NAV_LAST_FILTER="$filter_text"
                 return 0
                 ;;
             *) : ;;
@@ -1733,10 +1865,201 @@ Esc/Left - back to Project Timeline    / - filter by filename    q - quit the Ex
 # Module 2 menu. This needed no changes to any of Stages 1-5: this screen is
 # a thin additive wrapper on top of them.
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# ws_get_tracked_files — NUL-safe list of every tracked file, relative to
+# the repo root, regardless of the caller's current subdirectory. Sets
+# WS_PICKER_TRACKED. `git ls-files -z` (not plain newline-separated output)
+# is what makes this safe for filenames containing spaces, or — in the rare
+# but real case — literal newlines.
+# ------------------------------------------------------------------------------
+ws_get_tracked_files() {
+    WS_PICKER_TRACKED=()
+    local f
+    while IFS= read -r -d '' f; do
+        [[ -n "$f" ]] && WS_PICKER_TRACKED+=("$f")
+    done < <(git ls-files -z 2>/dev/null)
+}
+
+# ------------------------------------------------------------------------------
+# ws_get_deleted_files — paths that were deleted at some point in history and
+# are NOT currently tracked (a file deleted and later re-added is correctly
+# excluded — it belongs in the tracked list instead). Sets WS_PICKER_DELETED.
+# Requires WS_PICKER_TRACKED to already be populated (ws_get_tracked_files).
+# ------------------------------------------------------------------------------
+ws_get_deleted_files() {
+    WS_PICKER_DELETED=()
+    local -A tracked_set=()
+    local f
+    for f in "${WS_PICKER_TRACKED[@]}"; do
+        tracked_set["$f"]=1
+    done
+    local -A seen=()
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        [[ -n "${tracked_set[$f]:-}" ]] && continue
+        [[ -n "${seen[$f]:-}" ]] && continue
+        seen["$f"]=1
+        WS_PICKER_DELETED+=("$f")
+    done < <(git log --diff-filter=D --name-only --format="" 2>/dev/null)
+}
+
+# ------------------------------------------------------------------------------
+# ws_format_picker_row <path> <badge-already-colored-or-empty>
+# Truncates very long paths in the middle (keeping the start — usually the
+# most identifying directory — and the end, usually the filename) so one
+# absurdly long path can't push the badge off the end of the terminal.
+# ------------------------------------------------------------------------------
+ws_format_picker_row() {
+    local path="$1"
+    local badge="$2"
+    local display="$path"
+    local maxlen=70
+    if [[ ${#path} -gt $maxlen ]]; then
+        local keep=$(( (maxlen - 1) / 2 ))
+        display="${path:0:$keep}…${path: -$keep}"
+    fi
+    echo -e "${display}${badge}"
+}
+
+WS_FILE_PICKER_HELP_TEXT="Up/Down - move    Enter/Right - open this file's History
+Esc/Left - back    / - filter by typing part of a path (case-insensitive)
+PgUp/PgDn/Home/End - scroll a long list    q - quit the Explorer
+H - toggle showing files that were deleted but still have history
+Badges: [M]=modified [A]=added [D]=deleted [R]=renamed [!]=conflict (current
+working tree); [deleted] = no longer tracked, shown only when toggled on."
+
+# ------------------------------------------------------------------------------
+# ws_file_picker_screen — interactive file picker for File Timeline. Loads
+# the tracked-file list ONCE per visit (cheap to re-filter afterward, but
+# `git ls-files`/`git log --diff-filter=D` over a huge repo is not something
+# to redo on every keystroke), runs from the repo root so the whole
+# repository is visible regardless of the caller's cwd, and returns to
+# itself (cursor and filter preserved) after a round trip into a file's
+# History. Returns 1 if the user quit the whole Explorer from here.
+# ------------------------------------------------------------------------------
+ws_file_picker_screen() {
+    local repo_root
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [[ -z "$repo_root" ]]; then
+        ws_show_header
+        ws_draw_breadcrumb
+        echo -e "${RED}[!] Not a git repository — nothing to browse.${NC}"
+        read -rsn1 -p "Press any key to continue..."
+        return 0
+    fi
+
+    local orig_dir="$PWD"
+    cd "$repo_root" || return 0
+    ws_get_tracked_files
+
+    local show_deleted="false"
+    local last_selected_path=""
+    local last_filter=""
+    local rc=0
+
+    while true; do
+        if [[ "$show_deleted" == "true" ]]; then
+            ws_get_deleted_files
+        else
+            WS_PICKER_DELETED=()
+        fi
+        ws_load_status
+
+        if [[ ${#WS_PICKER_TRACKED[@]} -eq 0 && ${#WS_PICKER_DELETED[@]} -eq 0 ]]; then
+            ws_show_header
+            WS_BREADCRUMB=("Workspace Explorer" "File Timeline" "Browse")
+            ws_draw_breadcrumb
+            echo -e "${CYAN}This repository has no tracked files yet — nothing to browse.${NC}"
+            read -rsn1 -p "Press any key to continue..."
+            cd "$orig_dir" 2>/dev/null || true
+            return 0
+        fi
+
+        local -a paths=()
+        WS_NAV_ITEMS=()
+        local p si badge initial_cursor=-1 idx=0
+        for p in "${WS_PICKER_TRACKED[@]}" "${WS_PICKER_DELETED[@]}"; do
+            paths+=("$p")
+            badge=""
+            for si in "${!WS_STATUS_PATH[@]}"; do
+                if [[ "${WS_STATUS_PATH[$si]}" == "$p" ]]; then
+                    case "${WS_STATUS_BADGE[$si]}" in
+                        modified) badge="  ${YELLOW}[M]${NC}" ;;
+                        staged) badge="  ${GREEN}[M]${NC}" ;;
+                        added) badge="  ${GREEN}[A]${NC}" ;;
+                        deleted) badge="  ${RED}[D]${NC}" ;;
+                        renamed) badge="  ${YELLOW}[R]${NC}" ;;
+                        conflict) badge="  ${RED}[!]${NC}" ;;
+                    esac
+                    break
+                fi
+            done
+            if [[ -z "$badge" ]]; then
+                for si in "${!WS_PICKER_DELETED[@]}"; do
+                    if [[ "${WS_PICKER_DELETED[$si]}" == "$p" ]]; then
+                        badge="  ${RED}[deleted]${NC}"
+                        break
+                    fi
+                done
+            fi
+            WS_NAV_ITEMS+=("$(ws_format_picker_row "$p" "$badge")")
+            [[ "$p" == "$last_selected_path" ]] && initial_cursor=$idx
+            ((idx++))
+        done
+
+        WS_BREADCRUMB=("Workspace Explorer" "File Timeline" "Browse")
+        WS_NAV_TITLE="📜 BROWSE FILES"
+        WS_NAV_MARKABLE="false"
+        WS_NAV_FILTERABLE="true"
+        WS_NAV_VIEWPORT="true"
+        WS_NAV_CASE_INSENSITIVE="true"
+        WS_NAV_ITEM_NOUN="files"
+        WS_NAV_INITIAL_CURSOR="$initial_cursor"
+        WS_NAV_INITIAL_FILTER="$last_filter"
+        WS_NAV_HELP_TEXT="$WS_FILE_PICKER_HELP_TEXT"
+        WS_NAV_EXTRA_KEYS="H"
+        local h_label="Show"
+        [[ "$show_deleted" == "true" ]] && h_label="Hide"
+        WS_NAV_EXTRA_BAR="${CYAN}[H]${NC} ${h_label} deleted files"
+        WS_NAV_MARKED_INDICES=()
+
+        ws_list_navigate
+        last_filter="$WS_NAV_LAST_FILTER"
+
+        case "$WS_NAV_RESULT" in
+            open)
+                last_selected_path="${paths[$WS_NAV_SELECTED]}"
+                ws_file_timeline_screen "${paths[$WS_NAV_SELECTED]}"
+                rc=$?
+                cd "$repo_root" 2>/dev/null || true
+                if [[ $rc -ne 0 ]]; then
+                    cd "$orig_dir" 2>/dev/null || true
+                    return 1
+                fi
+                ;;
+            key:H)
+                if [[ "$show_deleted" == "true" ]]; then show_deleted="false"; else show_deleted="true"; fi
+                if [[ "$WS_NAV_SELECTED" -ge 0 ]]; then
+                    last_selected_path="${paths[$WS_NAV_SELECTED]}"
+                fi
+                ;;
+            quit)
+                cd "$orig_dir" 2>/dev/null || true
+                return 1
+                ;;
+            back|*)
+                cd "$orig_dir" 2>/dev/null || true
+                return 0
+                ;;
+        esac
+    done
+}
+
 ws_workspace_explorer_pick_file_timeline() {
     ws_show_header
     ws_draw_breadcrumb
-    echo -e "${YELLOW}${BOLD}FILE TIMELINE${NC}\n"
+    echo -e "${YELLOW}${BOLD}FILE TIMELINE — TYPE A PATH${NC}\n"
     echo -e "${CYAN}Enter the path to a tracked file (relative to the repo root, tab-completes).${NC}"
     local filepath
     read -e -r -p "File path (ENTER with nothing to cancel): " filepath
@@ -1749,6 +2072,37 @@ ws_workspace_explorer_pick_file_timeline() {
         return
     fi
     ws_file_timeline_screen "$filepath"
+}
+
+# ------------------------------------------------------------------------------
+# ws_file_timeline_chooser — shown when "File Timeline" is opened from the
+# Explorer's top-level menu: browse interactively (the file picker below) or
+# type a path manually (the pre-existing behavior above, unchanged). Uses
+# the same list navigator as everything else in the Explorer, so Esc/Left/q
+# all back out exactly like every other screen.
+# ------------------------------------------------------------------------------
+ws_file_timeline_chooser() {
+    WS_BREADCRUMB=("Workspace Explorer" "File Timeline")
+    WS_NAV_ITEMS=(
+        "$(echo -e "${GREEN}${BOLD}Browse files interactively${NC}  ${CYAN}(recommended)${NC}")"
+        "$(echo -e "${GREEN}${BOLD}Type a file path manually${NC}")"
+    )
+    WS_NAV_TITLE="📜 FILE TIMELINE"
+    WS_NAV_MARKABLE="false"
+    WS_NAV_FILTERABLE="false"
+    WS_NAV_HELP_TEXT="Up/Down - move    Enter/Right - open    Esc/Left or q - back"
+    WS_NAV_EXTRA_KEYS=""
+    WS_NAV_EXTRA_BAR=""
+    WS_NAV_MARKED_INDICES=()
+
+    ws_list_navigate
+
+    if [[ "$WS_NAV_RESULT" == "open" ]]; then
+        case "$WS_NAV_SELECTED" in
+            0) ws_file_picker_screen ;;
+            1) ws_workspace_explorer_pick_file_timeline ;;
+        esac
+    fi
 }
 
 ws_workspace_explorer() {
@@ -1773,7 +2127,7 @@ ws_workspace_explorer() {
             open)
                 case "$WS_NAV_SELECTED" in
                     0) ws_changes_screen ;;
-                    1) ws_workspace_explorer_pick_file_timeline ;;
+                    1) ws_file_timeline_chooser ;;
                     2) ws_project_timeline_screen ;;
                 esac
                 ;;

@@ -397,6 +397,10 @@ function ConvertTo-WsNormalizedKey {
         13 { return "ENTER" }
         27 { return "ESC" }
         32 { return "SPACE" }
+        33 { return "PGUP" }
+        34 { return "PGDN" }
+        36 { return "HOME" }
+        35 { return "END" }
     }
     switch ($RawKey.Character) {
         '/' { return "SLASH" }
@@ -449,9 +453,24 @@ function Get-WsVisibleIndices {
 #                     surfaced (e.g. "RMU" for per-screen batch actions like
 #                     Revert-all/Revert-Marked/Undo); any other unrecognized
 #                     character is silently ignored.
+#   -Viewport         $true to clip rendering to the console height and
+#                     scroll (Up/Down/PgUp/PgDn/Home/End move a viewport
+#                     window) instead of printing every item every redraw.
+#                     Default $false: every item is printed unconditionally,
+#                     exactly as before this was added -- needed for large
+#                     lists (hundreds-thousands of files), overkill and
+#                     visually unchanged for the short lists every existing
+#                     screen uses.
+#   -InitialCursor    an ORIGINAL index to start the cursor on, or -1 (the
+#                     default) for the top of the list.
+#   -InitialFilter    filter text to pre-apply on entry, or "" (the default)
+#                     for none. Lets a caller restore where the user was
+#                     after a round trip into a sub-screen.
 #
-# RETURNS: [PSCustomObject]@{ Result = "open"|"back"|"quit"|"key:<c>"; Selected = <int> }
+# RETURNS: [PSCustomObject]@{ Result = "open"|"back"|"quit"|"key:<c>"; Selected = <int>; LastFilter = <string> }
 # Selected is the ORIGINAL (unfiltered) index into -Items, or -1 for back/quit/key.
+# LastFilter is the filter text in effect when the screen was left, for a
+# caller that wants to pass it back in as -InitialFilter next time.
 # ------------------------------------------------------------------------------
 function Invoke-WsListNavigate {
     param(
@@ -464,7 +483,11 @@ function Invoke-WsListNavigate {
         [string]$ExtraBar = "",
         [System.Collections.Generic.List[int]]$MarkedIndices,
         [scriptblock]$RawKeyReader = { Get-WsRawKey },
-        [string]$ExtraKeys = ""
+        [string]$ExtraKeys = "",
+        [bool]$Viewport = $false,
+        [int]$InitialCursor = -1,
+        [string]$InitialFilter = "",
+        [string]$ItemNoun = "items"
     )
 
     # Explicit $null check, NOT "-not $MarkedIndices": an empty (but real,
@@ -475,9 +498,16 @@ function Invoke-WsListNavigate {
     if ($null -eq $MarkedIndices) { $MarkedIndices = [System.Collections.Generic.List[int]]::new() }
 
     $cursor = 0
-    $filterText = ""
+    $filterText = $InitialFilter
     $filterMode = $false
+    $viewOffset = 0
     $visibleIdx = Get-WsVisibleIndices -Items $Items -FilterText $filterText
+
+    if ($InitialCursor -ge 0) {
+        for ($row = 0; $row -lt $visibleIdx.Count; $row++) {
+            if ($visibleIdx[$row] -eq $InitialCursor) { $cursor = $row; break }
+        }
+    }
 
     while ($true) {
         if ($visibleIdx.Count -eq 0) {
@@ -487,6 +517,11 @@ function Invoke-WsListNavigate {
         } elseif ($cursor -lt 0) {
             $cursor = 0
         }
+
+        $consoleRows = 24
+        try { $consoleRows = $Host.UI.RawUI.WindowSize.Height } catch { }
+        $visibleRows = $consoleRows - 10
+        if ($visibleRows -lt 3) { $visibleRows = 3 }
 
         Show-WsHeader
         Write-WsBreadcrumb -Breadcrumb $Breadcrumb
@@ -498,6 +533,46 @@ function Invoke-WsListNavigate {
             } else {
                 Write-Host "(nothing here)" -ForegroundColor Cyan
             }
+        } elseif ($Viewport) {
+            # Opt-in only (see header note) -- clip rendering to the console
+            # height and keep the cursor in view, instead of printing every
+            # item every redraw. Skipped entirely for existing callers
+            # (Changes, File/Project Timeline), which never pass -Viewport,
+            # so their rendering is unchanged from before this was added.
+            $total = $visibleIdx.Count
+            if ($cursor -lt $viewOffset) { $viewOffset = $cursor }
+            if ($cursor -ge ($viewOffset + $visibleRows)) { $viewOffset = $cursor - $visibleRows + 1 }
+            if ($viewOffset -lt 0) { $viewOffset = 0 }
+            if (($viewOffset + $visibleRows) -gt $total) {
+                $viewOffset = $total - $visibleRows
+                if ($viewOffset -lt 0) { $viewOffset = 0 }
+            }
+
+            $shown = 0
+            for ($row = $viewOffset; $row -lt $total -and $shown -lt $visibleRows; $row++) {
+                $vi = $visibleIdx[$row]
+                $marker = "  "
+                if ($MarkedIndices.Contains($vi)) { $marker = "* " }
+                if ($row -eq $cursor) {
+                    Write-Host "$marker  " -NoNewline
+                    Write-Host "->" -NoNewline -ForegroundColor Green
+                    Write-Host " $($Items[$vi])"
+                } else {
+                    Write-Host "$marker     $($Items[$vi])"
+                }
+                $shown++
+            }
+            $noun = if ($ItemNoun) { $ItemNoun } else { "items" }
+            $unfilteredTotal = $Items.Count
+            if ($total -ne $unfilteredTotal) {
+                $countText = "$total of $unfilteredTotal $noun"
+            } else {
+                $countText = "$total $noun"
+            }
+            if ($total -gt $visibleRows) {
+                $countText += "  (showing $($viewOffset + 1)-$($viewOffset + $shown))"
+            }
+            Write-Host "`n$countText" -ForegroundColor Cyan
         } else {
             for ($row = 0; $row -lt $visibleIdx.Count; $row++) {
                 $vi = $visibleIdx[$row]
@@ -528,6 +603,7 @@ function Invoke-WsListNavigate {
         $bar = "[Up/Down] Move  [Enter/Right] Open  [Esc/Left] Back"
         if ($Markable) { $bar += "  [Space] Mark" }
         if ($Filterable) { $bar += "  [/] Filter" }
+        if ($Viewport) { $bar += "  [PgUp/PgDn/Home/End] Scroll" }
         $bar += "  [?] Help  [q] Quit"
         if ($ExtraBar) { $bar += "`n$ExtraBar" }
         Write-WsActionBar -Text $bar
@@ -565,21 +641,35 @@ function Invoke-WsListNavigate {
                     if ($cursor -ge $visibleIdx.Count) { $cursor = 0 }
                 }
             }
+            "HOME" {
+                $cursor = 0
+            }
+            "END" {
+                if ($visibleIdx.Count -gt 0) { $cursor = $visibleIdx.Count - 1 }
+            }
+            "PGUP" {
+                $cursor -= $visibleRows
+                if ($cursor -lt 0) { $cursor = 0 }
+            }
+            "PGDN" {
+                $cursor += $visibleRows
+                if ($visibleIdx.Count -gt 0 -and $cursor -ge $visibleIdx.Count) { $cursor = $visibleIdx.Count - 1 }
+            }
             "ENTER" {
                 if ($visibleIdx.Count -gt 0) {
-                    return [PSCustomObject]@{ Result = "open"; Selected = $visibleIdx[$cursor] }
+                    return [PSCustomObject]@{ Result = "open"; Selected = $visibleIdx[$cursor]; LastFilter = $filterText }
                 }
             }
             "RIGHT" {
                 if ($visibleIdx.Count -gt 0) {
-                    return [PSCustomObject]@{ Result = "open"; Selected = $visibleIdx[$cursor] }
+                    return [PSCustomObject]@{ Result = "open"; Selected = $visibleIdx[$cursor]; LastFilter = $filterText }
                 }
             }
             "ESC" {
-                return [PSCustomObject]@{ Result = "back"; Selected = -1 }
+                return [PSCustomObject]@{ Result = "back"; Selected = -1; LastFilter = $filterText }
             }
             "LEFT" {
-                return [PSCustomObject]@{ Result = "back"; Selected = -1 }
+                return [PSCustomObject]@{ Result = "back"; Selected = -1; LastFilter = $filterText }
             }
             "SPACE" {
                 if ($Markable -and $visibleIdx.Count -gt 0) {
@@ -604,7 +694,7 @@ function Invoke-WsListNavigate {
                 Write-Host ""
             }
             "Q" {
-                return [PSCustomObject]@{ Result = "quit"; Selected = -1 }
+                return [PSCustomObject]@{ Result = "quit"; Selected = -1; LastFilter = $filterText }
             }
             default {
                 if ($key.StartsWith("CHAR:")) {
@@ -615,7 +705,7 @@ function Invoke-WsListNavigate {
                         # a per-row extra action knows which row it applies to.
                         $sel = -1
                         if ($visibleIdx.Count -gt 0) { $sel = $visibleIdx[$cursor] }
-                        return [PSCustomObject]@{ Result = "key:$c"; Selected = $sel }
+                        return [PSCustomObject]@{ Result = "key:$c"; Selected = $sel; LastFilter = $filterText }
                     }
                 }
             }
