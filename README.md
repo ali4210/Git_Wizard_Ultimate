@@ -28,7 +28,7 @@ Built for beginners who fear `git push --force`, and for DevOps / DevSecOps engi
 
 <br/>
 
-[**Why**](#why) · [**Features**](#features) · [**Workspace Explorer**](#explorer) · [**Safety**](#safety) · [**Rollback**](#rollback) · [**Install**](#install) · [**Usage**](#usage) · [**Architecture**](#architecture) · [**FAQ**](#faq) · [**Roadmap**](#roadmap)
+[**Why**](#why) · [**Features**](#features) · [**Workspace Explorer**](#explorer) · [**Safety**](#safety) · [**Rollback**](#rollback) · [**Install**](#install) · [**Usage**](#usage) · [**Architecture**](#architecture) · [**Tests**](#tests) · [**FAQ**](#faq) · [**Roadmap**](#roadmap)
 
 </div>
 
