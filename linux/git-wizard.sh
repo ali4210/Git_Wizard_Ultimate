@@ -2075,7 +2075,7 @@ manage_github_ssh_keys() {
                 read -rsn2 -t 0.1 key
                 case "$key" in
                     '[A') ((selected--)); [ $selected -lt 0 ] && selected=$((count-1)) ;;
-                    '[B') ((selected++)); [ $selected -ge count ] && selected=0 ;;
+                    '[B') ((selected++)); [ $selected -ge $count ] && selected=0 ;;
                 esac
             elif [[ -z "$key" ]]; then
                 tput cnorm 2>/dev/null
@@ -2092,6 +2092,11 @@ manage_github_ssh_keys() {
     _arrow_confirm_delete() {
         local id="$1" title="$2" fp="$3"
         local selected="Yes"
+
+        if [[ -z "$id" ]]; then
+            echo -e "${RED}[!] No key selected.${NC}"
+            return 1
+        fi
 
         while true; do
             clear
