@@ -651,6 +651,16 @@ Core workflows behave the same on both platforms. A few extras are currently Lin
 | `git-absorb`, `ghq`, local CI (`act` / `gitlab-ci-local`) | ✅ | ➖ |
 | Package installer | apt / dnf / pacman / brew + binary fallback | winget + binary fallback |
 
+### 🪟 Windows-only safeguards
+
+These extra safety checks currently exist only in the PowerShell engine:
+
+| Safeguard | What it does |
+|---|---|
+| **Team Mode merge confirmation** | Merging a teammate's branch into `main` from the Admin Dashboard asks for explicit confirmation first |
+| **Discard stash guard** | *Discard changes* stashes your work before discarding, so it can be recovered |
+| **Rollback checkout check** | Before a rollback runs its hard reset, the tool verifies the target branch is checked out |
+
 > [!NOTE]
 > **Module 1 (Identity) menu numbering is not identical between platforms.** Windows has an extra **`[1]` gh Auth Manager** entry that Linux's Identity menu doesn't have, which shifts every other Identity item down one slot on Windows (e.g. Git user/email is `[1]` on Linux but `[2]` on Windows). The `0` = Back convention and every other module's numbering match exactly — this is specific to Module 1. Don't rely on digit positions for Module 1 across platforms; use the named menu labels instead. (Unifying the numbering itself — e.g. adding the same gh Auth Manager entry to Linux — is a tracked follow-up, not done yet.)
 
@@ -661,7 +671,7 @@ Core workflows behave the same on both platforms. A few extras are currently Lin
 ## 🔒 Security Notes
 
 > [!CAUTION]
-> **About the PAT Vault:** tokens are **encrypted at rest** in a local file (`pat_vault.env`) restricted to your user. On **Linux/macOS** they are encrypted with `openssl enc` (AES-256-CBC, PBKDF2) under your vault password; `openssl` is required, and the tool refuses to save a token without it. On **Windows** they are protected with **DPAPI**, tied to your Windows user account on that machine, so the file is **not portable** to another user or computer. Still treat it like any other credential store and prefer **fine-grained tokens with minimal scope**.
+> **About the PAT Vault:** tokens are **encrypted at rest** in a local file (`pat_vault.env`) restricted to your user. On **Linux** they are encrypted with `openssl enc` (AES-256-CBC, PBKDF2) under your vault password; `openssl` is required, and the tool refuses to save a token without it. On **Windows** they are protected with **DPAPI**, tied to your Windows user account on that machine, so the file is **not portable** to another user or computer. Still treat it like any other credential store and prefer **fine-grained tokens with minimal scope**.
 
 - 🔑 **SSH keys** are generated as ED25519 with restrictive file permissions, and uploads use your authenticated `gh` session.
 - 🌐 Credentials go only to GitHub/GitLab through their **official CLIs and APIs**.
