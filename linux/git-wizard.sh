@@ -213,7 +213,8 @@ force_sync_with_origin() {
     show_header
     echo -e "${RED}${BOLD}☢️  FORCE SYNC WITH ORIGIN (Nuclear Reset)${NC}\n"
     echo -e "${YELLOW}This makes your LOCAL branch identical to GitHub's version.${NC}"
-    echo -e "${YELLOW}Any local commits or changes not already on origin will be LOST (a backup tag is created first).${NC}\n"
+    echo -e "${YELLOW}Any local commits not already on origin will be LOST (a backup tag is created first).${NC}"
+    echo -e "${YELLOW}Any uncommitted/untracked changes will be stashed first so they aren't lost.${NC}\n"
 
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
         echo -e "${RED}[!] Not inside a Git repository.${NC}"
@@ -222,7 +223,7 @@ force_sync_with_origin() {
     fi
 
     # --- Step 1: Detect active branch & remote origin ---
-    echo -e "${CYAN}[1/5] Detecting active branch & remote origin...${NC}"
+    echo -e "${CYAN}[1/6] Detecting active branch & remote origin...${NC}"
     local BRANCH
     BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
     if [[ -z "$BRANCH" || "$BRANCH" == "HEAD" ]]; then
@@ -247,11 +248,11 @@ force_sync_with_origin() {
     fi
 
     # --- Step 2: Create automated safety backup tag/branch ---
-    echo -e "\n${CYAN}[2/5] Creating automated safety backup...${NC}"
+    echo -e "\n${CYAN}[2/6] Creating automated safety backup...${NC}"
     create_safety_backup "pre-force-sync-${BRANCH}"
 
     # --- Step 3: Fetch fresh refspec from origin ---
-    echo -e "\n${CYAN}[3/5] Fetching fresh refs from origin...${NC}"
+    echo -e "\n${CYAN}[3/6] Fetching fresh refs from origin...${NC}"
     if ! run_git fetch origin; then
         echo -e "${RED}[!] Fetch failed. Check your connection/remote. Aborting — nothing was reset.${NC}"
         pause
@@ -265,16 +266,32 @@ force_sync_with_origin() {
         return
     fi
 
-    # --- Step 4: Hard reset local branch to origin/<branch> ---
-    echo -e "\n${CYAN}[4/5] Hard resetting local '${BRANCH}' to 'origin/${BRANCH}'...${NC}"
+    # --- Step 4: Stash any dirty/untracked state (reset --hard / clean -fd would destroy it) ---
+    local STASH_MSG=""
+    if [[ -n "$(git status --porcelain)" ]]; then
+        STASH_MSG="gw-force-sync-${BRANCH}-$(date '+%Y%m%d-%H%M%S')"
+        echo -e "\n${CYAN}[4/6] Stashing uncommitted/untracked local changes...${NC}"
+        if ! git stash push -u -m "$STASH_MSG" >/dev/null 2>&1; then
+            echo -e "${RED}[!] Couldn't stash your local changes — aborting so nothing is lost.${NC}"
+            pause
+            return
+        fi
+        echo -e "${GREEN}[✔] Uncommitted/untracked files saved in stash '${STASH_MSG}'.${NC}"
+    fi
+
+    # --- Step 5: Hard reset local branch to origin/<branch> ---
+    echo -e "\n${CYAN}[5/6] Hard resetting local '${BRANCH}' to 'origin/${BRANCH}'...${NC}"
     run_git reset --hard "origin/${BRANCH}"
 
-    # --- Step 5: Clean untracked/leftover merge debris ---
-    echo -e "\n${CYAN}[5/5] Cleaning untracked files & leftover merge debris (-fd)...${NC}"
+    # --- Step 6: Clean untracked/leftover merge debris ---
+    echo -e "\n${CYAN}[6/6] Cleaning untracked files & leftover merge debris (-fd)...${NC}"
     run_git clean -fd
 
     echo -e "\n${GREEN}${BOLD}[✔] Force sync complete. Local '${BRANCH}' now matches origin/${BRANCH} exactly.${NC}"
-    echo -e "${GREEN}    Recover anything lost with: git reset --hard <backup-tag-name-shown-above>${NC}"
+    echo -e "${GREEN}    Recover lost commits with: git reset --hard <backup-tag-name-shown-above>${NC}"
+    if [[ -n "$STASH_MSG" ]]; then
+        echo -e "${GREEN}    Recover your uncommitted/untracked changes with: git stash list  (then: git stash apply stash^{/${STASH_MSG}})${NC}"
+    fi
     pause
 }
 
