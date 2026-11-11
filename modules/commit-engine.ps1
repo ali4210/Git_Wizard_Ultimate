@@ -42,8 +42,11 @@ Write-Host "`nCrafted Commit Message: $finalMsg" -ForegroundColor Cyan
 $doCommit = Read-Host "Execute commit now? (y/N)"
 if ($doCommit -eq "y" -or $doCommit -eq "Y") {
         Invoke-GitWizard add . | Out-Null
-        Invoke-GitWizard commit -m "$finalMsg" | Out-Null
-Write-Host "[+] Conventional commit created!" -ForegroundColor Green
+        if (Invoke-CommitWithHookRetry -Message $finalMsg) {
+            Write-Host "[+] Conventional commit created!" -ForegroundColor Green
+        } else {
+            Write-Host "[!] Commit was not created - see the message above (nothing staged, hook rejected it, or a conflict is in progress)." -ForegroundColor Red
+        }
     }
     Pause-Console
 }
