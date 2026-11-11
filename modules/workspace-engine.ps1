@@ -397,6 +397,10 @@ function ConvertTo-WsNormalizedKey {
         13 { return "ENTER" }
         27 { return "ESC" }
         32 { return "SPACE" }
+        33 { return "PGUP" }
+        34 { return "PGDN" }
+        36 { return "HOME" }
+        35 { return "END" }
     }
     switch ($RawKey.Character) {
         '/' { return "SLASH" }
@@ -449,9 +453,24 @@ function Get-WsVisibleIndices {
 #                     surfaced (e.g. "RMU" for per-screen batch actions like
 #                     Revert-all/Revert-Marked/Undo); any other unrecognized
 #                     character is silently ignored.
+#   -Viewport         $true to clip rendering to the console height and
+#                     scroll (Up/Down/PgUp/PgDn/Home/End move a viewport
+#                     window) instead of printing every item every redraw.
+#                     Default $false: every item is printed unconditionally,
+#                     exactly as before this was added -- needed for large
+#                     lists (hundreds-thousands of files), overkill and
+#                     visually unchanged for the short lists every existing
+#                     screen uses.
+#   -InitialCursor    an ORIGINAL index to start the cursor on, or -1 (the
+#                     default) for the top of the list.
+#   -InitialFilter    filter text to pre-apply on entry, or "" (the default)
+#                     for none. Lets a caller restore where the user was
+#                     after a round trip into a sub-screen.
 #
-# RETURNS: [PSCustomObject]@{ Result = "open"|"back"|"quit"|"key:<c>"; Selected = <int> }
+# RETURNS: [PSCustomObject]@{ Result = "open"|"back"|"quit"|"key:<c>"; Selected = <int>; LastFilter = <string> }
 # Selected is the ORIGINAL (unfiltered) index into -Items, or -1 for back/quit/key.
+# LastFilter is the filter text in effect when the screen was left, for a
+# caller that wants to pass it back in as -InitialFilter next time.
 # ------------------------------------------------------------------------------
 function Invoke-WsListNavigate {
     param(
@@ -464,7 +483,11 @@ function Invoke-WsListNavigate {
         [string]$ExtraBar = "",
         [System.Collections.Generic.List[int]]$MarkedIndices,
         [scriptblock]$RawKeyReader = { Get-WsRawKey },
-        [string]$ExtraKeys = ""
+        [string]$ExtraKeys = "",
+        [bool]$Viewport = $false,
+        [int]$InitialCursor = -1,
+        [string]$InitialFilter = "",
+        [string]$ItemNoun = "items"
     )
 
     # Explicit $null check, NOT "-not $MarkedIndices": an empty (but real,
@@ -475,9 +498,16 @@ function Invoke-WsListNavigate {
     if ($null -eq $MarkedIndices) { $MarkedIndices = [System.Collections.Generic.List[int]]::new() }
 
     $cursor = 0
-    $filterText = ""
+    $filterText = $InitialFilter
     $filterMode = $false
+    $viewOffset = 0
     $visibleIdx = Get-WsVisibleIndices -Items $Items -FilterText $filterText
+
+    if ($InitialCursor -ge 0) {
+        for ($row = 0; $row -lt $visibleIdx.Count; $row++) {
+            if ($visibleIdx[$row] -eq $InitialCursor) { $cursor = $row; break }
+        }
+    }
 
     while ($true) {
         if ($visibleIdx.Count -eq 0) {
@@ -487,6 +517,11 @@ function Invoke-WsListNavigate {
         } elseif ($cursor -lt 0) {
             $cursor = 0
         }
+
+        $consoleRows = 24
+        try { $consoleRows = $Host.UI.RawUI.WindowSize.Height } catch { }
+        $visibleRows = $consoleRows - 10
+        if ($visibleRows -lt 3) { $visibleRows = 3 }
 
         Show-WsHeader
         Write-WsBreadcrumb -Breadcrumb $Breadcrumb
@@ -498,6 +533,46 @@ function Invoke-WsListNavigate {
             } else {
                 Write-Host "(nothing here)" -ForegroundColor Cyan
             }
+        } elseif ($Viewport) {
+            # Opt-in only (see header note) -- clip rendering to the console
+            # height and keep the cursor in view, instead of printing every
+            # item every redraw. Skipped entirely for existing callers
+            # (Changes, File/Project Timeline), which never pass -Viewport,
+            # so their rendering is unchanged from before this was added.
+            $total = $visibleIdx.Count
+            if ($cursor -lt $viewOffset) { $viewOffset = $cursor }
+            if ($cursor -ge ($viewOffset + $visibleRows)) { $viewOffset = $cursor - $visibleRows + 1 }
+            if ($viewOffset -lt 0) { $viewOffset = 0 }
+            if (($viewOffset + $visibleRows) -gt $total) {
+                $viewOffset = $total - $visibleRows
+                if ($viewOffset -lt 0) { $viewOffset = 0 }
+            }
+
+            $shown = 0
+            for ($row = $viewOffset; $row -lt $total -and $shown -lt $visibleRows; $row++) {
+                $vi = $visibleIdx[$row]
+                $marker = "  "
+                if ($MarkedIndices.Contains($vi)) { $marker = "* " }
+                if ($row -eq $cursor) {
+                    Write-Host "$marker  " -NoNewline
+                    Write-Host "->" -NoNewline -ForegroundColor Green
+                    Write-Host " $($Items[$vi])"
+                } else {
+                    Write-Host "$marker     $($Items[$vi])"
+                }
+                $shown++
+            }
+            $noun = if ($ItemNoun) { $ItemNoun } else { "items" }
+            $unfilteredTotal = $Items.Count
+            if ($total -ne $unfilteredTotal) {
+                $countText = "$total of $unfilteredTotal $noun"
+            } else {
+                $countText = "$total $noun"
+            }
+            if ($total -gt $visibleRows) {
+                $countText += "  (showing $($viewOffset + 1)-$($viewOffset + $shown))"
+            }
+            Write-Host "`n$countText" -ForegroundColor Cyan
         } else {
             for ($row = 0; $row -lt $visibleIdx.Count; $row++) {
                 $vi = $visibleIdx[$row]
@@ -528,6 +603,7 @@ function Invoke-WsListNavigate {
         $bar = "[Up/Down] Move  [Enter/Right] Open  [Esc/Left] Back"
         if ($Markable) { $bar += "  [Space] Mark" }
         if ($Filterable) { $bar += "  [/] Filter" }
+        if ($Viewport) { $bar += "  [PgUp/PgDn/Home/End] Scroll" }
         $bar += "  [?] Help  [q] Quit"
         if ($ExtraBar) { $bar += "`n$ExtraBar" }
         Write-WsActionBar -Text $bar
@@ -565,21 +641,35 @@ function Invoke-WsListNavigate {
                     if ($cursor -ge $visibleIdx.Count) { $cursor = 0 }
                 }
             }
+            "HOME" {
+                $cursor = 0
+            }
+            "END" {
+                if ($visibleIdx.Count -gt 0) { $cursor = $visibleIdx.Count - 1 }
+            }
+            "PGUP" {
+                $cursor -= $visibleRows
+                if ($cursor -lt 0) { $cursor = 0 }
+            }
+            "PGDN" {
+                $cursor += $visibleRows
+                if ($visibleIdx.Count -gt 0 -and $cursor -ge $visibleIdx.Count) { $cursor = $visibleIdx.Count - 1 }
+            }
             "ENTER" {
                 if ($visibleIdx.Count -gt 0) {
-                    return [PSCustomObject]@{ Result = "open"; Selected = $visibleIdx[$cursor] }
+                    return [PSCustomObject]@{ Result = "open"; Selected = $visibleIdx[$cursor]; LastFilter = $filterText }
                 }
             }
             "RIGHT" {
                 if ($visibleIdx.Count -gt 0) {
-                    return [PSCustomObject]@{ Result = "open"; Selected = $visibleIdx[$cursor] }
+                    return [PSCustomObject]@{ Result = "open"; Selected = $visibleIdx[$cursor]; LastFilter = $filterText }
                 }
             }
             "ESC" {
-                return [PSCustomObject]@{ Result = "back"; Selected = -1 }
+                return [PSCustomObject]@{ Result = "back"; Selected = -1; LastFilter = $filterText }
             }
             "LEFT" {
-                return [PSCustomObject]@{ Result = "back"; Selected = -1 }
+                return [PSCustomObject]@{ Result = "back"; Selected = -1; LastFilter = $filterText }
             }
             "SPACE" {
                 if ($Markable -and $visibleIdx.Count -gt 0) {
@@ -604,7 +694,7 @@ function Invoke-WsListNavigate {
                 Write-Host ""
             }
             "Q" {
-                return [PSCustomObject]@{ Result = "quit"; Selected = -1 }
+                return [PSCustomObject]@{ Result = "quit"; Selected = -1; LastFilter = $filterText }
             }
             default {
                 if ($key.StartsWith("CHAR:")) {
@@ -615,7 +705,7 @@ function Invoke-WsListNavigate {
                         # a per-row extra action knows which row it applies to.
                         $sel = -1
                         if ($visibleIdx.Count -gt 0) { $sel = $visibleIdx[$cursor] }
-                        return [PSCustomObject]@{ Result = "key:$c"; Selected = $sel }
+                        return [PSCustomObject]@{ Result = "key:$c"; Selected = $sel; LastFilter = $filterText }
                     }
                 }
             }
@@ -1661,10 +1751,10 @@ function Show-WsProjectCommitDetailScreen {
 # file's header comment on this screen for why "quit" inside a sub-screen
 # just returns here rather than exiting the whole tool.
 # ==============================================================================
-function Show-WsFileTimelinePickerScreen {
+function Show-WsFileTimelineManualPathScreen {
     Show-WsHeader
-    Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer")
-    Write-Host "FILE TIMELINE`n" -ForegroundColor Yellow
+    Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer", "File Timeline")
+    Write-Host "FILE TIMELINE - TYPE A PATH`n" -ForegroundColor Yellow
     Write-Host "Enter the path to a tracked file (relative to the repo root)." -ForegroundColor Cyan
     $filepath = Read-Host "File path (ENTER with nothing to cancel)"
     if (-not $filepath) { return }
@@ -1679,6 +1769,207 @@ function Show-WsFileTimelinePickerScreen {
         return
     }
     [void](Show-WsFileTimelineScreen -Path $filepath)
+}
+
+# ------------------------------------------------------------------------------
+# Get-WsTrackedFiles -- NUL-safe list of every tracked file, relative to the
+# repo root, regardless of the caller's current directory. A .NET string can
+# hold embedded NUL characters without truncation (unlike a Bash variable),
+# so capturing `git ls-files -z`'s whole output and splitting on "`0" is
+# safe here -- this is the same technique Get-WsStatus already uses for
+# `git status --porcelain -z`.
+# ------------------------------------------------------------------------------
+function Get-WsTrackedFiles {
+    $rawLines = & git ls-files -z 2>$null
+    if (-not $rawLines) { return @() }
+    $raw = ($rawLines -join "")
+    $result = @()
+    foreach ($f in $raw.Split([char]0)) {
+        if ($f) { $result += $f }
+    }
+    return $result
+}
+
+# ------------------------------------------------------------------------------
+# Get-WsDeletedFiles -Tracked <array> -- paths deleted at some point in
+# history that are NOT currently tracked (a file deleted and later re-added
+# is correctly excluded -- it belongs in the tracked list instead).
+# ------------------------------------------------------------------------------
+function Get-WsDeletedFiles {
+    param([string[]]$Tracked)
+    $trackedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$Tracked)
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    $result = @()
+    $lines = git log --diff-filter=D --name-only --format="" 2>$null
+    foreach ($f in $lines) {
+        if (-not $f) { continue }
+        if ($trackedSet.Contains($f)) { continue }
+        if ($seen.Contains($f)) { continue }
+        [void]$seen.Add($f)
+        $result += $f
+    }
+    return $result
+}
+
+# ------------------------------------------------------------------------------
+# Format-WsPickerRow -Path <path> -Badge <already-colored-or-empty>
+# Truncates very long paths in the middle (keeping the start -- usually the
+# most identifying directory -- and the end, usually the filename) so one
+# absurdly long path can't push the badge off the end of the console.
+# ------------------------------------------------------------------------------
+function Format-WsPickerRow {
+    param([string]$Path, [string]$Badge)
+    $display = $Path
+    $maxlen = 70
+    if ($Path.Length -gt $maxlen) {
+        $keep = [Math]::Floor(($maxlen - 1) / 2)
+        $display = $Path.Substring(0, $keep) + [char]0x2026 + $Path.Substring($Path.Length - $keep)
+    }
+    return "$display$Badge"
+}
+
+$Global:WsFilePickerHelpText = @"
+Up/Down - move    Enter/Right - open this file's History
+Esc/Left - back    / - filter by typing part of a path (case-insensitive)
+PgUp/PgDn/Home/End - scroll a long list    q - quit the Explorer
+H - toggle showing files that were deleted but still have history
+Badges: [M]=modified [A]=added [D]=deleted [R]=renamed [!]=conflict (current
+working tree); [deleted] = no longer tracked, shown only when toggled on.
+"@
+
+# ------------------------------------------------------------------------------
+# Show-WsFilePickerScreen -- interactive file picker for File Timeline.
+# Loads the tracked-file list ONCE per visit (cheap to re-filter afterward,
+# but `git ls-files`/`git log --diff-filter=D` over a huge repo is not
+# something to redo on every keystroke), runs from the repo root so the
+# whole repository is visible regardless of the caller's directory, and
+# returns to itself (cursor and filter preserved) after a round trip into a
+# file's History. Returns $false if the user quit the whole Explorer here.
+# ------------------------------------------------------------------------------
+function Show-WsFilePickerScreen {
+    $repoRoot = (git rev-parse --show-toplevel 2>$null)
+    if (-not $repoRoot) {
+        Show-WsHeader
+        Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer", "File Timeline", "Browse")
+        Write-Host "[!] Not a git repository - nothing to browse." -ForegroundColor Red
+        Write-Host "Press any key to continue..." -NoNewline
+        [void](Get-WsRawKey)
+        Write-Host ""
+        return $true
+    }
+
+    $origDir = (Get-Location).Path
+    Set-Location $repoRoot
+    $tracked = @(Get-WsTrackedFiles)
+
+    $showDeleted = $false
+    $lastSelectedPath = ""
+    $lastFilter = ""
+
+    try {
+        while ($true) {
+            if ($showDeleted) {
+                $deleted = @(Get-WsDeletedFiles -Tracked $tracked)
+            } else {
+                $deleted = @()
+            }
+            $status = Get-WsStatus
+
+            if ($tracked.Count -eq 0 -and $deleted.Count -eq 0) {
+                Show-WsHeader
+                Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer", "File Timeline", "Browse")
+                Write-Host "This repository has no tracked files yet - nothing to browse." -ForegroundColor Cyan
+                Write-Host "Press any key to continue..." -NoNewline
+                [void](Get-WsRawKey)
+                Write-Host ""
+                return $true
+            }
+
+            $paths = @()
+            $items = @()
+            $initialCursor = -1
+            $idx = 0
+            $deletedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$deleted)
+            foreach ($p in ($tracked + $deleted)) {
+                $paths += $p
+                $badge = ""
+                $entry = $status | Where-Object { $_.Path -eq $p } | Select-Object -First 1
+                if ($entry) {
+                    switch ($entry.Badge) {
+                        "modified" { $badge = "  $($Global:WsYellow)[M]$($Global:WsReset)" }
+                        "staged"   { $badge = "  $($Global:WsGreen)[M]$($Global:WsReset)" }
+                        "added"    { $badge = "  $($Global:WsGreen)[A]$($Global:WsReset)" }
+                        "deleted"  { $badge = "  $($Global:WsRed)[D]$($Global:WsReset)" }
+                        "renamed"  { $badge = "  $($Global:WsYellow)[R]$($Global:WsReset)" }
+                        "conflict" { $badge = "  $($Global:WsRed)[!]$($Global:WsReset)" }
+                    }
+                }
+                if (-not $badge -and $deletedSet.Contains($p)) {
+                    $badge = "  $($Global:WsRed)[deleted]$($Global:WsReset)"
+                }
+                $items += (Format-WsPickerRow -Path $p -Badge $badge)
+                if ($p -eq $lastSelectedPath) { $initialCursor = $idx }
+                $idx++
+            }
+
+            $hLabel = if ($showDeleted) { "Hide" } else { "Show" }
+            $extraBar = "$($Global:WsCyan)[H]$($Global:WsReset) $hLabel deleted files"
+
+            $result = Invoke-WsListNavigate -Items $items -Title "BROWSE FILES" `
+                -Breadcrumb @("Workspace Explorer", "File Timeline", "Browse") `
+                -Markable $false -Filterable $true -HelpText $Global:WsFilePickerHelpText `
+                -ExtraBar $extraBar -ExtraKeys "H" -MarkedIndices ([System.Collections.Generic.List[int]]::new()) `
+                -Viewport $true -InitialCursor $initialCursor -InitialFilter $lastFilter -ItemNoun "files"
+            $lastFilter = $result.LastFilter
+
+            switch ($result.Result) {
+                "open" {
+                    $lastSelectedPath = $paths[$result.Selected]
+                    $r = Show-WsFileTimelineScreen -Path $paths[$result.Selected]
+                    Set-Location $repoRoot
+                    if (-not $r) { return $false }
+                }
+                "key:H" {
+                    $showDeleted = -not $showDeleted
+                    if ($result.Selected -ge 0) { $lastSelectedPath = $paths[$result.Selected] }
+                }
+                "quit" {
+                    return $false
+                }
+                default {
+                    return $true
+                }
+            }
+        }
+    } finally {
+        Set-Location $origDir
+    }
+}
+
+# ------------------------------------------------------------------------------
+# Show-WsFileTimelineChooser -- shown when "File Timeline" is opened from the
+# Explorer's top-level menu: browse interactively (the file picker above) or
+# type a path manually (the pre-existing behavior, unchanged). Uses the same
+# list navigator as everything else in the Explorer, so Esc/Left/q all back
+# out exactly like every other screen.
+# ------------------------------------------------------------------------------
+function Show-WsFileTimelineChooser {
+    $items = @(
+        "$($Global:WsGreen)$($Global:WsBold)Browse files interactively$($Global:WsReset)  $($Global:WsCyan)(recommended)$($Global:WsReset)",
+        "$($Global:WsGreen)$($Global:WsBold)Type a file path manually$($Global:WsReset)"
+    )
+    $helpText = "Up/Down - move    Enter/Right - open    Esc/Left or q - back"
+
+    $result = Invoke-WsListNavigate -Items $items -Title "FILE TIMELINE" `
+        -Breadcrumb @("Workspace Explorer", "File Timeline") `
+        -Markable $false -Filterable $false -HelpText $helpText -ExtraBar "" -ExtraKeys ""
+
+    if ($result.Result -eq "open") {
+        switch ($result.Selected) {
+            0 { [void](Show-WsFilePickerScreen) }
+            1 { Show-WsFileTimelineManualPathScreen }
+        }
+    }
 }
 
 function Show-WsWorkspaceExplorer {
@@ -1697,7 +1988,7 @@ function Show-WsWorkspaceExplorer {
             "open" {
                 switch ($result.Selected) {
                     0 { [void](Show-WsChangesScreen) }
-                    1 { Show-WsFileTimelinePickerScreen }
+                    1 { Show-WsFileTimelineChooser }
                     2 { [void](Show-WsProjectTimelineScreen) }
                 }
             }
