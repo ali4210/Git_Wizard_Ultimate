@@ -234,21 +234,35 @@ function Show-VaultSecuritySettings {
 # ==============================================================================
 # PERSONAL ACCESS TOKEN (PAT) VAULT MANAGER
 # ==============================================================================
+# Encrypted vault values are tagged with this versioned prefix so migration can tell "already
+# encrypted" apart from "legacy plaintext" by looking at how the value was WRITTEN, not by guessing
+# at token formats (classic 40-hex tokens, gho_/ghs_/ghu_/ghr_ etc. would all be missed by a
+# prefix-sniffing heuristic on the plaintext itself).
+$script:PatVaultEncryptedPrefix = "dpapi:v1:"
+
+function Test-PatVaultValueEncrypted {
+    param([string]$StoredValue)
+    return $StoredValue.StartsWith($script:PatVaultEncryptedPrefix)
+}
+
 # Encrypts a plaintext PAT with Windows DPAPI, tied to the current Windows user account on this machine.
 function Protect-PatVaultToken {
     param([string]$PlainToken)
     $secure = ConvertTo-SecureString -String $PlainToken -AsPlainText -Force
-    return ConvertFrom-SecureString -SecureString $secure
+    $encrypted = ConvertFrom-SecureString -SecureString $secure
+    return "$($script:PatVaultEncryptedPrefix)$encrypted"
 }
 
 # Decrypts a DPAPI-protected vault entry back to plaintext; returns $null if it can't be decrypted
-# (e.g. a blob saved by a different Windows user/machine). Legacy plaintext entries pass through as-is
-# so Invoke-PatVaultMigration can find and re-encrypt them.
+# (e.g. a blob saved by a different Windows user/machine). A value with no "dpapi:v1:" prefix was
+# never encrypted by this code and is returned as-is, so Invoke-PatVaultMigration can find and
+# re-encrypt it regardless of what token format it happens to be.
 function Unprotect-PatVaultToken {
     param([string]$StoredValue)
-    if ($StoredValue -match "^(ghp_|github_pat_)") { return $StoredValue }
+    if (-not (Test-PatVaultValueEncrypted -StoredValue $StoredValue)) { return $StoredValue }
+    $cipher = $StoredValue.Substring($script:PatVaultEncryptedPrefix.Length)
     try {
-        $secure = ConvertTo-SecureString -String $StoredValue -ErrorAction Stop
+        $secure = ConvertTo-SecureString -String $cipher -ErrorAction Stop
         $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($secure)
         try { return [System.Runtime.InteropServices.Marshal]::PtrToStringUni($bstr) }
         finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($bstr) }
@@ -257,13 +271,15 @@ function Unprotect-PatVaultToken {
     }
 }
 
-# One-time, transparent upgrade of any pre-encryption plaintext entries to DPAPI storage.
+# One-time, transparent upgrade of any pre-encryption plaintext entries to DPAPI storage. Anything
+# without the "dpapi:v1:" marker is treated as legacy plaintext and migrated, regardless of its
+# token format.
 function Invoke-PatVaultMigration {
     param([string]$VaultFile)
     if (-not (Test-Path $VaultFile) -or (Get-Item $VaultFile).Length -eq 0) { return }
     $migrated = $false
     $newLines = foreach ($line in (Get-Content $VaultFile)) {
-        if ($line.Trim() -and $line -match "^([^=]+)=(.*)$" -and $matches[2] -match "^(ghp_|github_pat_)") {
+        if ($line.Trim() -and $line -match "^([^=]+)=(.*)$" -and -not (Test-PatVaultValueEncrypted -StoredValue $matches[2])) {
             $migrated = $true
             "$($matches[1])=$(Protect-PatVaultToken -PlainToken $matches[2])"
         } else {

@@ -67,4 +67,47 @@ Describe "D5: PAT vault entries are encrypted at rest (Windows DPAPI) instead of
 
         (Get-Content -Path $vaultFile -Raw) | Should -Be $before
     }
+
+    # Detection is marker-based (the "dpapi:v1:" prefix added at encrypt time), NOT a guess at
+    # what a GitHub token looks like - this is a plain string check, so it needs no DPAPI and
+    # runs on every platform.
+    It "Test-PatVaultValueEncrypted is marker-based, not a guess at the token's own format" {
+        Test-PatVaultValueEncrypted -StoredValue "dpapi:v1:AQAAANCMnd8BFdERjHoAwE/Cl+sBAAAA..." | Should -BeTrue
+        Test-PatVaultValueEncrypted -StoredValue "ghp_SomeClassicLookingToken1234567890" | Should -BeFalse
+        Test-PatVaultValueEncrypted -StoredValue "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2" | Should -BeFalse
+        Test-PatVaultValueEncrypted -StoredValue "gho_SomeOAuthLookingToken" | Should -BeFalse
+    }
+
+    It "migrates a classic 40-character hex token even though it has no ghp_/github_pat_ prefix" -Skip:(-not $script:IsWindowsPlatform) {
+        # This is exactly the gap a prefix-sniffing heuristic would miss: classic PATs, and
+        # gho_/ghs_/ghu_/ghr_ tokens, don't start with ghp_ or github_pat_ at all.
+        $vaultFile = Join-Path ([System.IO.Path]::GetTempPath()) "gw-pester-vault-$([guid]::NewGuid()).env"
+        $classicHexToken = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        Set-Content -Path $vaultFile -Value "classic-alias=$classicHexToken"
+
+        try {
+            Invoke-PatVaultMigration -VaultFile $vaultFile
+
+            $rawContent = Get-Content -Path $vaultFile -Raw
+            $rawContent | Should -Not -Match ([regex]::Escape($classicHexToken))
+            $rawContent | Should -Match ([regex]::Escape($script:PatVaultEncryptedPrefix))
+
+            $storedLine = (Get-Content $vaultFile) | Where-Object { $_ -match "^classic-alias=" }
+            $storedValue = ($storedLine -split "=", 2)[1]
+            (Unprotect-PatVaultToken -StoredValue $storedValue) | Should -Be $classicHexToken
+        } finally {
+            Remove-Item -Path $vaultFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "does not re-encrypt an already-encrypted classic-hex-token entry (detection is marker-based, not format-based)" -Skip:(-not $script:IsWindowsPlatform) {
+        $vaultFile = Join-Path ([System.IO.Path]::GetTempPath()) "gw-pester-vault-$([guid]::NewGuid()).env"
+        $encrypted = Protect-PatVaultToken -PlainToken "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        Set-Content -Path $vaultFile -Value "classic-alias=$encrypted"
+        $before = Get-Content -Path $vaultFile -Raw
+
+        Invoke-PatVaultMigration -VaultFile $vaultFile
+
+        (Get-Content -Path $vaultFile -Raw) | Should -Be $before
+    }
 }
