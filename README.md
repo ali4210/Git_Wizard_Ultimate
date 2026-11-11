@@ -175,7 +175,7 @@ The main menu is organised into nine modules. Every submenu uses **`0` = Back**,
 | **SSH Manager** | Install and start the SSH service; generate an ED25519 key and print the public key |
 | **End-to-End SSH Setup** | Detects existing keys → generates one with a custom title → starts `ssh-agent` → checks by **fingerprint** whether the key is already on GitHub → uploads through `gh` → tests `ssh -T git@github.com` |
 | **GitHub Key Manager** | Table of ID, title, fingerprint and date; delete a single key or **purge all** (with strong confirmation) |
-| **PAT Vault** | Guided creation of fine-grained or classic tokens (opens the right GitHub page), save with an alias, view, delete locally or **locally and on GitHub**, optional password lock |
+| **PAT Vault** | Guided creation of fine-grained or classic tokens (opens the right GitHub page), save with an alias, view, delete locally or **locally and on GitHub**. Encrypted at rest ([details](#security)): a vault password is required on Linux, DPAPI on Windows |
 | **Remote URL Manager** | Inspect remotes, set a new origin (auto-strips a pasted `git remote add origin` prefix), toggle **HTTPS ⇄ SSH** |
 | **gh Auth Manager** *(Windows)* | Login, logout, status and API reachability check |
 
@@ -193,7 +193,7 @@ The main menu is organised into nine modules. Every submenu uses **`0` = Back**,
 | **1-Click Destroy** | Detects the remote from `origin`, deletes it on the host, and offers to auto-fix a missing `delete_repo` scope |
 | **Quick Push** | `add` → commit → push, with hook-retry |
 | **Reset and Undo Utility** | Unstage, discard changes, soft or hard rollback of the last commit, and **Force Sync with Origin** |
-| **Force Sync with Origin** | 5-step nuclear reset: detect branch and remote → backup tag → fetch → `reset --hard` → `clean -fd` |
+| **Force Sync with Origin** | 6-step nuclear reset: detect branch and remote → backup tag → fetch → **stash dirty/untracked work** → `reset --hard` → `clean -fd` |
 | **Smart Conflict Resolver** | Safe rebase, safe merge, **Force Push and Force Pull, each with rollback** ([details](#rollback)) |
 | **`.gitignore` Generator** | Templates for Python, Node.js and Go/Linux |
 | **Pre-commit Hooks** | Installs the `pre-commit` framework, writes a default config, enables or disables the hook |
@@ -314,9 +314,9 @@ The `git status` view: every modified, staged, deleted, renamed and untracked fi
 | `2` | Revert to the version before this file's last change | `git restore --source=<2nd-newest commit touching this file>` |
 | `3` | Revert to the original state (the commit that first added it) | `git restore --source=<commit from --diff-filter=A>` |
 | `D` *(untracked files only)* | Delete the file | `git clean -f` — **no backup tag is possible**: an untracked file was never committed, so this is the one action the Undo journal can't offer |
-| `H` | Jump to this file's **File Timeline** | — |
+| `T` | Jump to this file's **File Timeline** | — |
 
-Options `2`/`3` only appear when that earlier version actually exists; `1` is hidden for a brand-new, never-committed file. From the list itself: `R` reverts **all** tracked changes to their last commit (untracked files are never touched by a batch action), `M` reverts only the files you've **marked** with `Space`, and `H` opens the **File Timeline** for the highlighted file.
+Options `2`/`3` only appear when that earlier version actually exists; `1` is hidden for a brand-new, never-committed file. From the list itself: `R` reverts **all** tracked changes to their last commit (untracked files are never touched by a batch action), `M` reverts only the files you've **marked** with `Space`, and `H` opens the **File Timeline** for the highlighted file. `U` undoes the most recent revert/apply/restore action via the undo journal.
 
 A file with unresolved merge/rebase/cherry-pick conflict markers opens a dedicated screen instead, with `[A]` to abort the in-progress operation.
 
@@ -469,7 +469,7 @@ flowchart TD
 
 | Platform | You need |
 |---|---|
-| 🐧 **Linux** | Bash 4+, `curl`. Git is **auto-installed** if missing. Optional: `gh`, `glab`, `delta`, `chafa`, `jq` |
+| 🐧 **Linux** | Bash 4+, `curl`. Git is **auto-installed** if missing. `openssl` (required to save or view tokens in the PAT Vault; it refuses to save without it). Optional: `gh`, `glab`, `delta`, `chafa`, `jq` |
 | 🍎 **macOS** | Bash 4+ (`brew install bash`, because the system Bash 3.2 is too old). Git via Xcode Command Line Tools or Homebrew (handled for you) |
 | 🪟 **Windows** | Windows 10/11 with **Windows PowerShell 5.1**. Git is **auto-installed** via `winget` or the official installer if missing |
 
@@ -554,7 +554,7 @@ Nothing is magic. Here is what the friendly menus actually execute:
 | Force Push | `git fetch` → `git tag` (remote state) → `git push --force-with-lease=<branch>:<sha>` |
 | Force Push Rollback | `git push origin <old-sha>:refs/heads/<branch> --force-with-lease` |
 | Force Pull | `git stash push -u` → `git reset --hard origin/<branch>` → `git clean -fd` |
-| Force Sync | `git fetch` → `git reset --hard origin/<branch>` → `git clean -fd` |
+| Force Sync | `git fetch` → `git stash push -u` (if dirty) → `git reset --hard origin/<branch>` → `git clean -fd` |
 | Safe Update Sync | `git stash push` → `git pull --rebase` → `git stash pop` |
 | Admin merge | `git diff main...origin/<branch>` → `git merge --no-ff` |
 
@@ -661,7 +661,7 @@ Core workflows behave the same on both platforms. A few extras are currently Lin
 ## 🔒 Security Notes
 
 > [!CAUTION]
-> **About the PAT Vault:** tokens are stored in a local file (`pat_vault.env`) restricted to your user (`chmod 600` on Linux). The optional master password (SHA-256 hashed) gates access **inside the tool**, but it does **not** encrypt the file. Treat it like any other credential store and prefer **fine-grained tokens with minimal scope**.
+> **About the PAT Vault:** tokens are **encrypted at rest** in a local file (`pat_vault.env`) restricted to your user. On **Linux/macOS** they are encrypted with `openssl enc` (AES-256-CBC, PBKDF2) under your vault password; `openssl` is required, and the tool refuses to save a token without it. On **Windows** they are protected with **DPAPI**, tied to your Windows user account on that machine, so the file is **not portable** to another user or computer. Still treat it like any other credential store and prefer **fine-grained tokens with minimal scope**.
 
 - 🔑 **SSH keys** are generated as ED25519 with restrictive file permissions, and uploads use your authenticated `gh` session.
 - 🌐 Credentials go only to GitHub/GitLab through their **official CLIs and APIs**.
@@ -765,6 +765,7 @@ Git_Wizard_Ultimate/
 ├── 🚀 autorun.bat                # Windows launcher
 ├── 📦 install.sh                 # Global installer + optional tool stack
 ├── 📖 README.md
+├── 📄 LICENSE                    # MIT
 ├── 🖼️ assets/
 │   └── octocat.png               # Header image (rendered with chafa when available)
 ├── 🐧 linux/
@@ -773,6 +774,9 @@ Git_Wizard_Ultimate/
 ├── 🛠️ dev-tools/
 │   ├── try-explorer.sh           # Standalone Workspace Explorer tester (Linux)
 │   └── try-explorer.ps1          # Standalone Workspace Explorer tester (Windows)
+├── 🧪 tests/
+│   ├── bats/                     # Bash regression tests (bats-core)
+│   └── pester/                   # PowerShell regression tests (Pester)
 └── 🪟 modules/                   # Windows PowerShell engine
     ├── git-wizard.ps1            # Orchestrator, config, safety/backup engine, main menu
     ├── identity-engine.ps1       # Module 1: identity, SSH, PAT vault, gh auth
@@ -788,6 +792,27 @@ Git_Wizard_Ultimate/
 
 ---
 
+<a id="tests"></a>
+
+## 🧪 Running the Tests
+
+Regression tests cover the safety-critical paths on both engines.
+
+```bash
+# Linux / macOS (needs bats-core)
+bats tests/bats/
+```
+
+```powershell
+# Windows (needs Pester 5+)
+Invoke-Pester -Path .\tests\pester\ -Output Detailed
+```
+
+> [!NOTE]
+> The DPAPI vault tests run only on Windows and are skipped elsewhere.
+
+---
+
 <a id="roadmap"></a>
 
 ## 🧭 Roadmap
@@ -796,7 +821,6 @@ Git_Wizard_Ultimate/
 - [ ] 🤖 CI: ShellCheck for the Bash engine and PSScriptAnalyzer for the PowerShell modules
 - [ ] 🪟 Windows parity for the Git CLI Hub and the remaining bonus tools
 - [ ] ⏪ Multi-step rollback history (currently the most recent force push/pull per repo)
-- [ ] 🔐 Optional encrypted PAT storage
 - [ ] 📸 Screenshot and demo GIF gallery
 
 ---
