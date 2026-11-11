@@ -211,7 +211,13 @@ function Invoke-RollbackForcePull {
         Write-Host "[i] Your current uncommitted changes were stashed as 'gw-pre-rollback-$now'." -ForegroundColor Yellow
     }
     $cur = git rev-parse --abbrev-ref HEAD 2>$null
-    if ($cur -ne $rb.Branch) { git checkout $rb.Branch }
+    if ($cur -ne $rb.Branch) {
+        git checkout $rb.Branch 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[!] Could not check out '$($rb.Branch)' - rollback aborted, nothing was changed." -ForegroundColor Red
+            return
+        }
+    }
 
     git reset --hard $rb.HeadSha
     if ($LASTEXITCODE -ne 0) { Write-Host "[!] Reset failed." -ForegroundColor Red; return }

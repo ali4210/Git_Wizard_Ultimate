@@ -243,7 +243,7 @@ function Invoke-GitWizard {
         return $true
     } else {
         Write-WizardActionLog "EXECUTED: git $ArgString"
-        & git @GitArgs
+        & git @GitArgs | ForEach-Object { Write-Host $_ }
         return ($LASTEXITCODE -eq 0)
     }
 }

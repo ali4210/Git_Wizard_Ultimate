@@ -234,15 +234,75 @@ function Show-VaultSecuritySettings {
 # ==============================================================================
 # PERSONAL ACCESS TOKEN (PAT) VAULT MANAGER
 # ==============================================================================
+# Encrypted vault values are tagged with this versioned prefix so migration can tell "already
+# encrypted" apart from "legacy plaintext" by looking at how the value was WRITTEN, not by guessing
+# at token formats (classic 40-hex tokens, gho_/ghs_/ghu_/ghr_ etc. would all be missed by a
+# prefix-sniffing heuristic on the plaintext itself).
+$script:PatVaultEncryptedPrefix = "dpapi:v1:"
+
+function Test-PatVaultValueEncrypted {
+    param([string]$StoredValue)
+    return $StoredValue.StartsWith($script:PatVaultEncryptedPrefix)
+}
+
+# Encrypts a plaintext PAT with Windows DPAPI, tied to the current Windows user account on this machine.
+function Protect-PatVaultToken {
+    param([string]$PlainToken)
+    $secure = ConvertTo-SecureString -String $PlainToken -AsPlainText -Force
+    $encrypted = ConvertFrom-SecureString -SecureString $secure
+    return "$($script:PatVaultEncryptedPrefix)$encrypted"
+}
+
+# Decrypts a DPAPI-protected vault entry back to plaintext; returns $null if it can't be decrypted
+# (e.g. a blob saved by a different Windows user/machine). A value with no "dpapi:v1:" prefix was
+# never encrypted by this code and is returned as-is, so Invoke-PatVaultMigration can find and
+# re-encrypt it regardless of what token format it happens to be.
+function Unprotect-PatVaultToken {
+    param([string]$StoredValue)
+    if (-not (Test-PatVaultValueEncrypted -StoredValue $StoredValue)) { return $StoredValue }
+    $cipher = $StoredValue.Substring($script:PatVaultEncryptedPrefix.Length)
+    try {
+        $secure = ConvertTo-SecureString -String $cipher -ErrorAction Stop
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToGlobalAllocUnicode($secure)
+        try { return [System.Runtime.InteropServices.Marshal]::PtrToStringUni($bstr) }
+        finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($bstr) }
+    } catch {
+        return $null
+    }
+}
+
+# One-time, transparent upgrade of any pre-encryption plaintext entries to DPAPI storage. Anything
+# without the "dpapi:v1:" marker is treated as legacy plaintext and migrated, regardless of its
+# token format.
+function Invoke-PatVaultMigration {
+    param([string]$VaultFile)
+    if (-not (Test-Path $VaultFile) -or (Get-Item $VaultFile).Length -eq 0) { return }
+    $migrated = $false
+    $newLines = foreach ($line in (Get-Content $VaultFile)) {
+        if ($line.Trim() -and $line -match "^([^=]+)=(.*)$" -and -not (Test-PatVaultValueEncrypted -StoredValue $matches[2])) {
+            $migrated = $true
+            "$($matches[1])=$(Protect-PatVaultToken -PlainToken $matches[2])"
+        } else {
+            $line
+        }
+    }
+    if ($migrated) {
+        Set-Content -Path $VaultFile -Value $newLines
+        Write-WizardActionLog "PAT vault: migrated legacy plaintext token(s) to DPAPI-encrypted storage"
+    }
+}
+
 function Manage-PatVault {
     $vaultFile = Join-Path $Global:ConfigDir "pat_vault.env"
     if (-not (Test-Path $vaultFile)) { New-Item -Path $vaultFile -ItemType File -Force | Out-Null }
+    Invoke-PatVaultMigration -VaultFile $vaultFile
     while ($true) {
         Show-Header
         $vCfg = Get-VaultConfig
         $lockIcon = if ($vCfg.Status -eq "locked") { "[LOCKED]" } else { "[UNLOCKED]" }
         Write-Host "  PERSONAL ACCESS TOKEN (PAT) VAULT $lockIcon`n" -ForegroundColor Yellow
-        Write-Host "  GitHub only shows a PAT once. This vault securely stores it for reuse.`n" -ForegroundColor Cyan
+        Write-Host "  GitHub only shows a PAT once. This vault stores it encrypted via Windows DPAPI," -ForegroundColor Cyan
+        Write-Host "  tied to your Windows user account on THIS machine (not portable to another PC/user).`n" -ForegroundColor Cyan
         Write-Host "  [1] Create New Token (Opens browser + Save to Vault)" -ForegroundColor Green
         Write-Host "  [2] View Saved Tokens" -ForegroundColor Green
         Write-Host "  [3] Delete a Saved Token" -ForegroundColor Red
@@ -278,8 +338,8 @@ function Manage-PatVault {
                 if ([string]::IsNullOrEmpty($tokenAlias)) { $tokenAlias = "token-$(Get-Date -Format 'yyyyMMdd-HHmmss')" }
                 $existingContent = ""; if (Test-Path $vaultFile) { $existingContent = Get-Content $vaultFile -Raw }
                 if ($existingContent -match "^$tokenAlias=") { Write-Host "[!] Alias already exists." -ForegroundColor Red; Pause-Console; continue }
-                Add-Content -Path $vaultFile -Value "$tokenAlias=$newToken"
-                Write-Host "`n[+] Token securely saved to vault as '$tokenAlias'!" -ForegroundColor Green
+                Add-Content -Path $vaultFile -Value "$tokenAlias=$(Protect-PatVaultToken -PlainToken $newToken)"
+                Write-Host "`n[+] Token encrypted and saved to vault as '$tokenAlias'!" -ForegroundColor Green
                 Write-WizardActionLog "Saved new PAT to vault: $tokenAlias"
                 Pause-Console
             }
@@ -291,8 +351,13 @@ function Manage-PatVault {
                 } else {
                     Get-Content $vaultFile | ForEach-Object {
                         if ($_.Trim() -and $_ -match "^([^=]+)=(.*)$") {
+                            $plainToken = Unprotect-PatVaultToken -StoredValue $matches[2]
                             Write-Host "  [$($matches[1])]" -ForegroundColor Green
-                            Write-Host "      Token: $($matches[2])`n" -ForegroundColor Cyan
+                            if ($null -eq $plainToken) {
+                                Write-Host "      Token: <could not decrypt - saved by a different Windows user/machine>`n" -ForegroundColor Red
+                            } else {
+                                Write-Host "      Token: $plainToken`n" -ForegroundColor Cyan
+                            }
                         }
                     }
                 }
@@ -656,11 +721,13 @@ function Manage-SshMenu {
 
                     $selfScript = $MyInvocation.MyCommand.Path
                     if (-not $selfScript) { $selfScript = $PSCommandPath }
+                    # Escape quotes: an unescaped ' in the path would break out of the literal below and run as code in this ELEVATED helper.
+                    $selfScriptEscaped = $selfScript -replace "'", "''"
 
                     try {
                         # Re-launch a NEW elevated PowerShell that just runs the server-setup helper function.
                         $helperCode = @"
-Import-Module '$selfScript' -Force -ErrorAction SilentlyContinue
+Import-Module '$selfScriptEscaped' -Force -ErrorAction SilentlyContinue
 `$ErrorActionPreference = 'Continue'
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue | Out-Null
 if (Get-Service sshd -ErrorAction SilentlyContinue) {
