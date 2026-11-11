@@ -656,11 +656,13 @@ function Manage-SshMenu {
 
                     $selfScript = $MyInvocation.MyCommand.Path
                     if (-not $selfScript) { $selfScript = $PSCommandPath }
+                    # Escape quotes: an unescaped ' in the path would break out of the literal below and run as code in this ELEVATED helper.
+                    $selfScriptEscaped = $selfScript -replace "'", "''"
 
                     try {
                         # Re-launch a NEW elevated PowerShell that just runs the server-setup helper function.
                         $helperCode = @"
-Import-Module '$selfScript' -Force -ErrorAction SilentlyContinue
+Import-Module '$selfScriptEscaped' -Force -ErrorAction SilentlyContinue
 `$ErrorActionPreference = 'Continue'
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue | Out-Null
 if (Get-Service sshd -ErrorAction SilentlyContinue) {
