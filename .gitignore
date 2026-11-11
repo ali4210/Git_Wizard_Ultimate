@@ -4,3 +4,4 @@
 bin/
 .env
 *.tar.gz
+.claude/worktrees/
