@@ -534,7 +534,7 @@ Backups still run automatically in **both** modes. You can switch any time in **
 
 | I want to... | Go to |
 |---|---|
-| Connect this machine to GitHub over SSH | `1` → `3` → `3` → **Setup End-to-End** |
+| Connect this machine to GitHub over SSH | **Identity** menu → **SSH Manager** → **SSH GitHub Manager** → **Setup End-to-End** |
 | Publish a brand-new project | `2` → `1` → **1-Click Complete Repo Setup** |
 | Write a clean commit message | `4` → **Conventional Commit Assistant** |
 | Fix a rejected push | `2` → `6` → **Smart Conflict Resolver** |
