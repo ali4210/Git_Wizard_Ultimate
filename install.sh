@@ -6,7 +6,11 @@
 #               delta, chafa, lazygit, git-absorb, ghq, act/gitlab-ci-local).
 # ==============================================================================
 
-set -e
+# NOTE: 'set -e' was removed — same reasoning as linux/git-wizard.sh and
+# autorun.sh. If the global symlink step below failed under errexit (sudo
+# denied, /usr/local/bin missing, read-only filesystem, etc.), the whole
+# installer died silently with no message and never offered the optional
+# tool-stack setup that follows. The symlink step is now guarded explicitly.
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -30,20 +34,32 @@ chmod +x "$SCRIPT_PATH"
 chmod +x "${INSTALL_DIR}/autorun.sh" 2>/dev/null || true
 
 # Symlink to /usr/local/bin for global CLI access
+SYMLINK_OK=true
 if [[ -w "/usr/local/bin" ]]; then
-ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard
+    if ! ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard; then
+        SYMLINK_OK=false
+    fi
 else
-echo -e "${CYAN}--> Requesting root permission to link binary into /usr/local/bin/git-wizard...${NC}"
-sudo ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard
+    echo -e "${CYAN}--> Requesting root permission to link binary into /usr/local/bin/git-wizard...${NC}"
+    if ! sudo ln -sf "$SCRIPT_PATH" /usr/local/bin/git-wizard; then
+        SYMLINK_OK=false
+    fi
 fi
 
-echo -e "\n===================================================================="
-echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON YOUR SYSTEM!${NC}"
-echo -e "===================================================================="
-echo -e "${CYAN}📌 HOW TO USE FROM ANY FOLDER:${NC}"
-echo -e "  1. Open ANY terminal and 'cd' into ANY Git repository on your machine."
-echo -e "  2. Simply type: ${GREEN}${BOLD}git-wizard${NC}"
-echo -e "====================================================================\n"
+if [[ "$SYMLINK_OK" != "true" ]]; then
+    echo -e "${RED}[!] Could not create the global symlink (sudo denied or /usr/local/bin unavailable).${NC}"
+    echo -e "${YELLOW}    You can still use ./autorun.sh directly, or add linux/git-wizard.sh to your PATH manually.${NC}"
+fi
+
+if [[ "$SYMLINK_OK" == "true" ]]; then
+    echo -e "\n===================================================================="
+    echo -e "${GREEN}${BOLD}[✔] GIT-WIZARD IS NOW INSTALLED GLOBALLY ON YOUR SYSTEM!${NC}"
+    echo -e "===================================================================="
+    echo -e "${CYAN}📌 HOW TO USE FROM ANY FOLDER:${NC}"
+    echo -e "  1. Open ANY terminal and 'cd' into ANY Git repository on your machine."
+    echo -e "  2. Simply type: ${GREEN}${BOLD}git-wizard${NC}"
+    echo -e "====================================================================\n"
+fi
 
 # ==============================================================================
 # OPTIONAL TOOL STACK — same detect -> offer -> fallback pattern used inside
