@@ -534,7 +534,7 @@ Backups still run automatically in **both** modes. You can switch any time in **
 
 | I want to... | Go to |
 |---|---|
-| Connect this machine to GitHub over SSH | `1` → `3` → `3` → **Setup End-to-End** |
+| Connect this machine to GitHub over SSH | **Identity** menu → **SSH Manager** → **SSH GitHub Manager** → **Setup End-to-End** |
 | Publish a brand-new project | `2` → `1` → **1-Click Complete Repo Setup** |
 | Write a clean commit message | `4` → **Conventional Commit Assistant** |
 | Fix a rejected push | `2` → `6` → **Smart Conflict Resolver** |
@@ -622,7 +622,7 @@ flowchart TD
 
 | Decision | Why it matters |
 |---|---|
-| 🧩 **Two native engines, one UX** | Bash on Unix-like systems and modular PowerShell on Windows, with the same menus and the same `0` = Back convention |
+| 🧩 **Two native engines, one UX** | Bash on Unix-like systems and modular PowerShell on Windows, with nearly identical menus and the same `0` = Back convention everywhere (Module 1's numbering is the one exception — see [Parity](#parity)) |
 | 🔌 **Provider abstraction** | All hosting actions flow through `vcs_*` / `Vcs-*` dispatchers, so GitHub and GitLab share menus |
 | 🩹 **Self-healing dependencies** | Missing `git`, `gh`, `jq` and friends are detected and installed on demand: package manager first, prebuilt binary second, `PATH` refreshed in-process so **no terminal restart** is needed |
 | 🧯 **Failure isolation** | Commands that can legitimately fail (missing scope, 403, rate limit) run through a safe runner that reports the problem without crashing. Global `errexit` was deliberately removed |
@@ -650,6 +650,9 @@ Core workflows behave the same on both platforms. A few extras are currently Lin
 | Git CLI Hub (repo list and remote file browser) | ✅ | ➖ |
 | `git-absorb`, `ghq`, local CI (`act` / `gitlab-ci-local`) | ✅ | ➖ |
 | Package installer | apt / dnf / pacman / brew + binary fallback | winget + binary fallback |
+
+> [!NOTE]
+> **Module 1 (Identity) menu numbering is not identical between platforms.** Windows has an extra **`[1]` gh Auth Manager** entry that Linux's Identity menu doesn't have, which shifts every other Identity item down one slot on Windows (e.g. Git user/email is `[1]` on Linux but `[2]` on Windows). The `0` = Back convention and every other module's numbering match exactly — this is specific to Module 1. Don't rely on digit positions for Module 1 across platforms; use the named menu labels instead. (Unifying the numbering itself — e.g. adding the same gh Auth Manager entry to Linux — is a tracked follow-up, not done yet.)
 
 ---
 
@@ -789,7 +792,7 @@ Git_Wizard_Ultimate/
 
 ## 🧭 Roadmap
 
-- [ ] 📄 Add a `LICENSE` file and tagged GitHub Releases (enables the built-in update checker)
+- [ ] 📄 Tagged GitHub Releases (enables the built-in update checker)
 - [ ] 🤖 CI: ShellCheck for the Bash engine and PSScriptAnalyzer for the PowerShell modules
 - [ ] 🪟 Windows parity for the Git CLI Hub and the remaining bonus tools
 - [ ] ⏪ Multi-step rollback history (currently the most recent force push/pull per repo)
