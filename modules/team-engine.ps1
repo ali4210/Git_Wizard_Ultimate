@@ -168,6 +168,11 @@ function Invoke-TeamModeAdminDashboard {
     $MChoice = Read-Host "Choice [0-2]"
     switch ($MChoice) {
         "1" {
+            if (-not (Confirm-DestructiveAction "Merge '$ReviewBranch' into main and push to origin")) {
+                Write-Host "[i] Cancelled, no changes made." -ForegroundColor Yellow
+                Pause-Console
+                return
+            }
             New-SafetyBackup "pre-merge-$ReviewBranch"
             if (Invoke-GitWizard checkout main) {
                 if (Invoke-GitWizard merge --no-ff "origin/$ReviewBranch" -m "Merge branch '$ReviewBranch' via git-wizard Team Mode") {
