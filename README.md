@@ -300,6 +300,7 @@ One keyboard-driven screen for everything you'd otherwise hop between `git statu
 | `/` | Filter the current list by typing part of a name |
 | `?` | Help for the current screen |
 | `q` | Quit the current sub-screen back to the Explorer's home screen |
+| `PgUp`/`PgDn`/`Home`/`End` | Scroll long lists (the file picker; any screen with more rows than fit on screen) |
 
 A breadcrumb at the top always shows where you are, e.g. `Changes › src/app.py › History › a1b2c3d`. Pressing `q` on the Explorer's own home screen (not a sub-screen) is what actually leaves the Explorer and returns to Module 2.
 
@@ -321,7 +322,22 @@ A file with unresolved merge/rebase/cherry-pick conflict markers opens a dedicat
 
 ### 📜 Screen 2 — File Timeline
 
-Every commit that touched the file (`git log --follow`), paged ~50 at a time (`N`/`P` for next/previous page). `Enter` on a commit shows that commit's change to the file, with four actions:
+Opening **File Timeline** from the Explorer's home screen asks how you want to pick the file:
+
+| Option | What happens |
+|---|---|
+| **Browse files interactively** *(recommended)* | An interactive picker over every tracked file (`git ls-files`), run from the repo root so you see the whole repository regardless of your current folder |
+| **Type a file path manually** | The original behavior — type a path, tab-completes, same as before |
+
+**The file picker:**
+- `/` filters by typing part of a path (case-insensitive); a live count (`42 of 310 files`) tracks matches as you type
+- `Up`/`Down`/`PgUp`/`PgDn`/`Home`/`End` move and scroll — tested responsive on repos with 300+ files
+- A badge shows files with uncommitted changes (`[M]`/`[A]`/`[D]`/`[R]`/`[!]`)
+- `H` toggles showing files that were **deleted** but still have history (`[deleted]`), found via `git log --diff-filter=D`, so you can still view a deleted file's timeline
+- Going back from a file's timeline returns to the picker with your cursor position and filter exactly as you left them
+- Very long paths truncate in the middle (`src/…/app.py`) so the badge never gets pushed off-screen
+
+Once a file is selected (either way), every commit that touched it (`git log --follow`) is shown, paged ~50 at a time (`N`/`P` for next/previous page). `Enter` on a commit shows that commit's change to the file, with four actions:
 
 | Key | Action | What it does |
 |---|---|---|

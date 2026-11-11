@@ -1751,10 +1751,10 @@ function Show-WsProjectCommitDetailScreen {
 # file's header comment on this screen for why "quit" inside a sub-screen
 # just returns here rather than exiting the whole tool.
 # ==============================================================================
-function Show-WsFileTimelinePickerScreen {
+function Show-WsFileTimelineManualPathScreen {
     Show-WsHeader
-    Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer")
-    Write-Host "FILE TIMELINE`n" -ForegroundColor Yellow
+    Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer", "File Timeline")
+    Write-Host "FILE TIMELINE - TYPE A PATH`n" -ForegroundColor Yellow
     Write-Host "Enter the path to a tracked file (relative to the repo root)." -ForegroundColor Cyan
     $filepath = Read-Host "File path (ENTER with nothing to cancel)"
     if (-not $filepath) { return }
@@ -1769,6 +1769,207 @@ function Show-WsFileTimelinePickerScreen {
         return
     }
     [void](Show-WsFileTimelineScreen -Path $filepath)
+}
+
+# ------------------------------------------------------------------------------
+# Get-WsTrackedFiles -- NUL-safe list of every tracked file, relative to the
+# repo root, regardless of the caller's current directory. A .NET string can
+# hold embedded NUL characters without truncation (unlike a Bash variable),
+# so capturing `git ls-files -z`'s whole output and splitting on "`0" is
+# safe here -- this is the same technique Get-WsStatus already uses for
+# `git status --porcelain -z`.
+# ------------------------------------------------------------------------------
+function Get-WsTrackedFiles {
+    $rawLines = & git ls-files -z 2>$null
+    if (-not $rawLines) { return @() }
+    $raw = ($rawLines -join "")
+    $result = @()
+    foreach ($f in $raw.Split([char]0)) {
+        if ($f) { $result += $f }
+    }
+    return $result
+}
+
+# ------------------------------------------------------------------------------
+# Get-WsDeletedFiles -Tracked <array> -- paths deleted at some point in
+# history that are NOT currently tracked (a file deleted and later re-added
+# is correctly excluded -- it belongs in the tracked list instead).
+# ------------------------------------------------------------------------------
+function Get-WsDeletedFiles {
+    param([string[]]$Tracked)
+    $trackedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$Tracked)
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    $result = @()
+    $lines = git log --diff-filter=D --name-only --format="" 2>$null
+    foreach ($f in $lines) {
+        if (-not $f) { continue }
+        if ($trackedSet.Contains($f)) { continue }
+        if ($seen.Contains($f)) { continue }
+        [void]$seen.Add($f)
+        $result += $f
+    }
+    return $result
+}
+
+# ------------------------------------------------------------------------------
+# Format-WsPickerRow -Path <path> -Badge <already-colored-or-empty>
+# Truncates very long paths in the middle (keeping the start -- usually the
+# most identifying directory -- and the end, usually the filename) so one
+# absurdly long path can't push the badge off the end of the console.
+# ------------------------------------------------------------------------------
+function Format-WsPickerRow {
+    param([string]$Path, [string]$Badge)
+    $display = $Path
+    $maxlen = 70
+    if ($Path.Length -gt $maxlen) {
+        $keep = [Math]::Floor(($maxlen - 1) / 2)
+        $display = $Path.Substring(0, $keep) + [char]0x2026 + $Path.Substring($Path.Length - $keep)
+    }
+    return "$display$Badge"
+}
+
+$Global:WsFilePickerHelpText = @"
+Up/Down - move    Enter/Right - open this file's History
+Esc/Left - back    / - filter by typing part of a path (case-insensitive)
+PgUp/PgDn/Home/End - scroll a long list    q - quit the Explorer
+H - toggle showing files that were deleted but still have history
+Badges: [M]=modified [A]=added [D]=deleted [R]=renamed [!]=conflict (current
+working tree); [deleted] = no longer tracked, shown only when toggled on.
+"@
+
+# ------------------------------------------------------------------------------
+# Show-WsFilePickerScreen -- interactive file picker for File Timeline.
+# Loads the tracked-file list ONCE per visit (cheap to re-filter afterward,
+# but `git ls-files`/`git log --diff-filter=D` over a huge repo is not
+# something to redo on every keystroke), runs from the repo root so the
+# whole repository is visible regardless of the caller's directory, and
+# returns to itself (cursor and filter preserved) after a round trip into a
+# file's History. Returns $false if the user quit the whole Explorer here.
+# ------------------------------------------------------------------------------
+function Show-WsFilePickerScreen {
+    $repoRoot = (git rev-parse --show-toplevel 2>$null)
+    if (-not $repoRoot) {
+        Show-WsHeader
+        Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer", "File Timeline", "Browse")
+        Write-Host "[!] Not a git repository - nothing to browse." -ForegroundColor Red
+        Write-Host "Press any key to continue..." -NoNewline
+        [void](Get-WsRawKey)
+        Write-Host ""
+        return $true
+    }
+
+    $origDir = (Get-Location).Path
+    Set-Location $repoRoot
+    $tracked = @(Get-WsTrackedFiles)
+
+    $showDeleted = $false
+    $lastSelectedPath = ""
+    $lastFilter = ""
+
+    try {
+        while ($true) {
+            if ($showDeleted) {
+                $deleted = @(Get-WsDeletedFiles -Tracked $tracked)
+            } else {
+                $deleted = @()
+            }
+            $status = Get-WsStatus
+
+            if ($tracked.Count -eq 0 -and $deleted.Count -eq 0) {
+                Show-WsHeader
+                Write-WsBreadcrumb -Breadcrumb @("Workspace Explorer", "File Timeline", "Browse")
+                Write-Host "This repository has no tracked files yet - nothing to browse." -ForegroundColor Cyan
+                Write-Host "Press any key to continue..." -NoNewline
+                [void](Get-WsRawKey)
+                Write-Host ""
+                return $true
+            }
+
+            $paths = @()
+            $items = @()
+            $initialCursor = -1
+            $idx = 0
+            $deletedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$deleted)
+            foreach ($p in ($tracked + $deleted)) {
+                $paths += $p
+                $badge = ""
+                $entry = $status | Where-Object { $_.Path -eq $p } | Select-Object -First 1
+                if ($entry) {
+                    switch ($entry.Badge) {
+                        "modified" { $badge = "  $($Global:WsYellow)[M]$($Global:WsReset)" }
+                        "staged"   { $badge = "  $($Global:WsGreen)[M]$($Global:WsReset)" }
+                        "added"    { $badge = "  $($Global:WsGreen)[A]$($Global:WsReset)" }
+                        "deleted"  { $badge = "  $($Global:WsRed)[D]$($Global:WsReset)" }
+                        "renamed"  { $badge = "  $($Global:WsYellow)[R]$($Global:WsReset)" }
+                        "conflict" { $badge = "  $($Global:WsRed)[!]$($Global:WsReset)" }
+                    }
+                }
+                if (-not $badge -and $deletedSet.Contains($p)) {
+                    $badge = "  $($Global:WsRed)[deleted]$($Global:WsReset)"
+                }
+                $items += (Format-WsPickerRow -Path $p -Badge $badge)
+                if ($p -eq $lastSelectedPath) { $initialCursor = $idx }
+                $idx++
+            }
+
+            $hLabel = if ($showDeleted) { "Hide" } else { "Show" }
+            $extraBar = "$($Global:WsCyan)[H]$($Global:WsReset) $hLabel deleted files"
+
+            $result = Invoke-WsListNavigate -Items $items -Title "BROWSE FILES" `
+                -Breadcrumb @("Workspace Explorer", "File Timeline", "Browse") `
+                -Markable $false -Filterable $true -HelpText $Global:WsFilePickerHelpText `
+                -ExtraBar $extraBar -ExtraKeys "H" -MarkedIndices ([System.Collections.Generic.List[int]]::new()) `
+                -Viewport $true -InitialCursor $initialCursor -InitialFilter $lastFilter -ItemNoun "files"
+            $lastFilter = $result.LastFilter
+
+            switch ($result.Result) {
+                "open" {
+                    $lastSelectedPath = $paths[$result.Selected]
+                    $r = Show-WsFileTimelineScreen -Path $paths[$result.Selected]
+                    Set-Location $repoRoot
+                    if (-not $r) { return $false }
+                }
+                "key:H" {
+                    $showDeleted = -not $showDeleted
+                    if ($result.Selected -ge 0) { $lastSelectedPath = $paths[$result.Selected] }
+                }
+                "quit" {
+                    return $false
+                }
+                default {
+                    return $true
+                }
+            }
+        }
+    } finally {
+        Set-Location $origDir
+    }
+}
+
+# ------------------------------------------------------------------------------
+# Show-WsFileTimelineChooser -- shown when "File Timeline" is opened from the
+# Explorer's top-level menu: browse interactively (the file picker above) or
+# type a path manually (the pre-existing behavior, unchanged). Uses the same
+# list navigator as everything else in the Explorer, so Esc/Left/q all back
+# out exactly like every other screen.
+# ------------------------------------------------------------------------------
+function Show-WsFileTimelineChooser {
+    $items = @(
+        "$($Global:WsGreen)$($Global:WsBold)Browse files interactively$($Global:WsReset)  $($Global:WsCyan)(recommended)$($Global:WsReset)",
+        "$($Global:WsGreen)$($Global:WsBold)Type a file path manually$($Global:WsReset)"
+    )
+    $helpText = "Up/Down - move    Enter/Right - open    Esc/Left or q - back"
+
+    $result = Invoke-WsListNavigate -Items $items -Title "FILE TIMELINE" `
+        -Breadcrumb @("Workspace Explorer", "File Timeline") `
+        -Markable $false -Filterable $false -HelpText $helpText -ExtraBar "" -ExtraKeys ""
+
+    if ($result.Result -eq "open") {
+        switch ($result.Selected) {
+            0 { [void](Show-WsFilePickerScreen) }
+            1 { Show-WsFileTimelineManualPathScreen }
+        }
+    }
 }
 
 function Show-WsWorkspaceExplorer {
@@ -1787,7 +1988,7 @@ function Show-WsWorkspaceExplorer {
             "open" {
                 switch ($result.Selected) {
                     0 { [void](Show-WsChangesScreen) }
-                    1 { Show-WsFileTimelinePickerScreen }
+                    1 { Show-WsFileTimelineChooser }
                     2 { [void](Show-WsProjectTimelineScreen) }
                 }
             }
