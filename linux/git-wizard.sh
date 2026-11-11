@@ -2430,6 +2430,91 @@ _hash_pass() {
     echo -n "$1" | sha256sum | awk '{print $1}'
 }
 
+# ==============================================================================
+# VAULT ENCRYPTION HELPERS
+# PAT vault contents are encrypted at rest with the vault's own master
+# password via openssl (AES-256-CBC, PBKDF2, 200k iterations). The plaintext
+# password is kept only in the in-memory VAULT_SESSION_KEY for the life of
+# this process — never written to disk — and is passed to openssl via an fd
+# (not argv), so it never appears in `ps` output either.
+#
+# `openssl enc` has no AEAD mode on this project's supported OpenSSL
+# versions, so plain CBC gives no integrity check: decrypting with the WRONG
+# password doesn't reliably error, it can silently "succeed" with garbage
+# bytes. To detect that deterministically, every plaintext payload is
+# prefixed with a fixed marker line before encrypting; a decrypt whose first
+# line isn't that marker is treated as a failed/garbage decrypt.
+# ==============================================================================
+_VAULT_MARKER="GITWIZARD_VAULT_V1"
+
+_vault_file_is_encrypted() {
+    [[ -s "$VAULT_FILE" ]] || return 1
+    local magic
+    magic=$(head -c 8 "$VAULT_FILE" 2>/dev/null)
+    [[ "$magic" == "Salted__" ]]
+}
+
+_vault_encrypt_write() {
+    # Encrypts "$1" (tagged with the integrity marker) and atomically
+    # replaces $VAULT_FILE — but only after verifying the ciphertext decrypts
+    # back to the exact original content, so a bad write can never corrupt
+    # or silently lose the vault.
+    local plaintext="$1"
+    command -v openssl &>/dev/null || return 1
+    local tagged="${_VAULT_MARKER}"$'\n'"${plaintext}"
+    local tmp_enc
+    tmp_enc=$(mktemp) || return 1
+    if ! openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass fd:3 \
+            -out "$tmp_enc" 3<<<"$VAULT_SESSION_KEY" <<<"$tagged" 2>/dev/null; then
+        rm -f "$tmp_enc"
+        return 1
+    fi
+    local check
+    check=$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass fd:3 \
+            -in "$tmp_enc" 3<<<"$VAULT_SESSION_KEY" 2>/dev/null)
+    if [[ "$check" != "$tagged" ]]; then
+        rm -f "$tmp_enc"
+        return 1
+    fi
+    chmod 600 "$tmp_enc"
+    mv "$tmp_enc" "$VAULT_FILE"
+}
+
+_vault_decrypt_read() {
+    # Prints the vault's decrypted plaintext to stdout. Empty output means
+    # an empty vault, a decrypt failure, or a wrong/stale password — callers
+    # already treat an empty result as "nothing to show", which is the safe
+    # default in every case.
+    [[ -s "$VAULT_FILE" ]] || return 0
+    if _vault_file_is_encrypted; then
+        command -v openssl &>/dev/null || return 1
+        local raw first_line
+        raw=$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass fd:3 \
+            -in "$VAULT_FILE" 3<<<"$VAULT_SESSION_KEY" 2>/dev/null)
+        first_line=$(printf '%s\n' "$raw" | head -n1)
+        [[ "$first_line" == "$_VAULT_MARKER" ]] || return 1
+        printf '%s\n' "$raw" | tail -n +2
+    else
+        cat "$VAULT_FILE"
+    fi
+}
+
+_vault_migrate_if_needed() {
+    # Transparently encrypts a legacy plaintext vault file in place. Never
+    # touches the original file unless the new ciphertext is verified to
+    # round-trip back to byte-identical content first.
+    [[ -s "$VAULT_FILE" ]] || return 0
+    _vault_file_is_encrypted && return 0
+    local plaintext
+    plaintext=$(cat "$VAULT_FILE")
+    if _vault_encrypt_write "$plaintext"; then
+        log_action "Migrated PAT vault to encrypted storage"
+        echo -e "${GREEN}[✔] Existing vault contents encrypted at rest.${NC}"
+    else
+        echo -e "${RED}[!] Could not migrate the vault to encrypted storage — left as plaintext. Check that 'openssl' is installed correctly and try again.${NC}"
+    fi
+}
+
 _load_vault_config() {
     VAULT_PASS_HASH=""
     VAULT_LOCK_STATUS="unlocked"
@@ -2450,11 +2535,13 @@ EOF
 
 _prompt_vault_access() {
     _load_vault_config
+    : "${VAULT_SESSION_KEY:=}" # only ever reset by a fresh process, not by re-entering this menu
 
     # 1. If no password is set at all, force creation
     if [[ -z "$VAULT_PASS_HASH" ]]; then
         echo -e "${YELLOW}[i] First time using the vault. Please create a master password.${NC}"
         echo -e "${CYAN}    (You can toggle the lock on/off later in Vault Security Settings)${NC}"
+        echo -e "${CYAN}    This password also encrypts the vault's contents on disk.${NC}"
         while true; do
             read -s -p "    Create vault password: " p1
             echo ""
@@ -2462,9 +2549,11 @@ _prompt_vault_access() {
             echo ""
             if [[ "$p1" == "$p2" && -n "$p1" ]]; then
                 VAULT_PASS_HASH=$(_hash_pass "$p1")
+                VAULT_SESSION_KEY="$p1"
                 VAULT_LOCK_STATUS="unlocked" # Defaults to unlocked for easy access
                 _save_vault_config
                 echo -e "${GREEN}[✔] Vault password created. Vault is UNLOCKED for easy access.${NC}"
+                _vault_migrate_if_needed
                 return 0
             else
                 echo -e "${RED}[!] Passwords did not match or were empty. Try again.${NC}"
@@ -2472,31 +2561,37 @@ _prompt_vault_access() {
         done
     fi
 
-    # 2. If vault is unlocked, allow access without password
-    if [[ "$VAULT_LOCK_STATUS" == "unlocked" ]]; then
+    # 2. We already derived the encryption key earlier this process run — reuse it.
+    if [[ -n "$VAULT_SESSION_KEY" ]]; then
         return 0
     fi
 
-    # 3. If vault is locked, ask for password
-    if [[ "$VAULT_LOCK_STATUS" == "locked" ]]; then
+    # 3. Vault contents are always encrypted with the master password. Even in
+    #    "unlocked" mode (no re-prompt on future *menu* visits within this run),
+    #    we still need the plaintext password once per process to derive the
+    #    decryption key — it is never written to disk.
+    local prompt_label="    Password: "
+    if [[ "$VAULT_LOCK_STATUS" == "unlocked" ]]; then
+        echo -e "${CYAN}[i] Vault is unlocked, but your password is needed once per session to decrypt its contents.${NC}"
+    else
         echo -e "${YELLOW}[🔒] Vault is LOCKED. Enter master password to proceed.${NC}"
-        local attempts=3
-        while [[ $attempts -gt 0 ]]; do
-            read -s -p "    Password: " p_input
-            echo ""
-            if [[ "$(_hash_pass "$p_input")" == "$VAULT_PASS_HASH" ]]; then
-                echo -e "${GREEN}[✔] Access granted.${NC}"
-                return 0
-            else
-                attempts=$((attempts-1))
-                echo -e "${RED}[!] Incorrect password. ${attempts} attempts remaining.${NC}"
-            fi
-        done
-        echo -e "${RED}[!] Access denied. Returning to menu.${NC}"
-        sleep 2
-        return 1
     fi
-
+    local attempts=3
+    while [[ $attempts -gt 0 ]]; do
+        read -s -p "$prompt_label" p_input
+        echo ""
+        if [[ "$(_hash_pass "$p_input")" == "$VAULT_PASS_HASH" ]]; then
+            VAULT_SESSION_KEY="$p_input"
+            [[ "$VAULT_LOCK_STATUS" == "locked" ]] && echo -e "${GREEN}[✔] Access granted.${NC}"
+            _vault_migrate_if_needed
+            return 0
+        else
+            attempts=$((attempts-1))
+            echo -e "${RED}[!] Incorrect password. ${attempts} attempts remaining.${NC}"
+        fi
+    done
+    echo -e "${RED}[!] Access denied. Returning to menu.${NC}"
+    sleep 2
     return 1
 }
 
@@ -2533,6 +2628,22 @@ _manage_vault_security_settings() {
                     read -s -p "    Confirm NEW vault password: " p2
                     echo ""
                     if [[ "$p1" == "$p2" && -n "$p1" ]]; then
+                        # Re-encrypt any existing vault contents with the new
+                        # password BEFORE switching the session key, so saved
+                        # tokens remain decryptable under the new password.
+                        if [[ -s "$VAULT_FILE" ]]; then
+                            local vault_plain old_key
+                            vault_plain=$(_vault_decrypt_read)
+                            old_key="$VAULT_SESSION_KEY"
+                            VAULT_SESSION_KEY="$p1"
+                            if ! _vault_encrypt_write "$vault_plain"; then
+                                VAULT_SESSION_KEY="$old_key"
+                                echo -e "${RED}[!] Could not re-encrypt the vault with the new password. Password NOT changed.${NC}"
+                                break
+                            fi
+                        else
+                            VAULT_SESSION_KEY="$p1"
+                        fi
                         VAULT_PASS_HASH=$(_hash_pass "$p1")
                         [[ -z "$VAULT_LOCK_STATUS" ]] && VAULT_LOCK_STATUS="unlocked"
                         _save_vault_config
@@ -2600,7 +2711,8 @@ manage_pat_vault() {
         if [[ "$VAULT_LOCK_STATUS" == "locked" ]]; then lock_icon="🔒"; fi
 
         echo -e "${YELLOW}${BOLD}🔑 PERSONAL ACCESS TOKEN (PAT) VAULT ${lock_icon}${NC}\n"
-        echo -e "${CYAN}GitHub only shows a PAT once. This vault securely stores it for reuse.${NC}\n"
+        echo -e "${CYAN}GitHub only shows a PAT once. This vault securely stores it for reuse.${NC}"
+        echo -e "${CYAN}Tokens are encrypted at rest; your vault password is requested once per session.${NC}\n"
         echo -e "  ${GREEN}[1]${NC} 🌐 Create New Token (Opens browser + Save to Vault)"
         echo -e "  ${GREEN}[2]${NC} 📋 View Saved Tokens"
         echo -e "  ${RED}[3]${NC} 🗑️  Delete a Saved Token"
@@ -2612,6 +2724,13 @@ manage_pat_vault() {
         case $PAT_CHOICE in
             1)
                 if ! _prompt_vault_access; then continue; fi
+
+                if ! command -v openssl &>/dev/null; then
+                    echo -e "\n${RED}[!] 'openssl' is required to securely store tokens in the vault.${NC}"
+                    echo -e "${YELLOW}    Install it (e.g. 'sudo apt install openssl') and try again.${NC}"
+                    pause
+                    continue
+                fi
 
                 echo -e "\n${CYAN}What type of token do you want to create?${NC}\n"
                 echo -e "  ${GREEN}[1]${NC} Fine-grained token (Recommended - restrict to specific repos)"
@@ -2661,14 +2780,27 @@ manage_pat_vault() {
                     TOKEN_ALIAS="token-$(date '+%Y%m%d-%H%M%S')"
                 fi
 
-                if grep -q "^${TOKEN_ALIAS}=" "$VAULT_FILE" 2>/dev/null; then
+                local vault_plain
+                vault_plain=$(_vault_decrypt_read)
+
+                if echo "$vault_plain" | grep -q "^${TOKEN_ALIAS}="; then
                     echo -e "${RED}[!] A token with this alias already exists. Please use a different name.${NC}"
                     pause
                     continue
                 fi
 
-                echo "${TOKEN_ALIAS}=${NEW_TOKEN}" >> "$VAULT_FILE"
-                chmod 600 "$VAULT_FILE"
+                local new_plain
+                if [[ -n "$vault_plain" ]]; then
+                    new_plain="${vault_plain}"$'\n'"${TOKEN_ALIAS}=${NEW_TOKEN}"
+                else
+                    new_plain="${TOKEN_ALIAS}=${NEW_TOKEN}"
+                fi
+
+                if ! _vault_encrypt_write "$new_plain"; then
+                    echo -e "\n${RED}[!] Failed to encrypt and save the vault. Nothing was changed.${NC}"
+                    pause
+                    continue
+                fi
 
                 echo -e "\n${GREEN}${BOLD}[✔] Token securely saved to vault as '${TOKEN_ALIAS}'!${NC}"
                 log_action "Saved new PAT to vault: ${TOKEN_ALIAS}"
@@ -2682,7 +2814,9 @@ manage_pat_vault() {
                 echo -e "${BOLD}              SAVED PERSONAL ACCESS TOKENS${NC}"
                 echo -e "${CYAN}═══════════════════════════════════════════════════${NC}\n"
 
-                if [[ ! -s "$VAULT_FILE" ]]; then
+                local vault_plain
+                vault_plain=$(_vault_decrypt_read)
+                if [[ -z "$vault_plain" ]]; then
                     echo -e "${YELLOW}[i] Vault is empty. Create a token first (Option 1).${NC}"
                 else
                     local idx=1
@@ -2691,7 +2825,7 @@ manage_pat_vault() {
                         printf "  ${GREEN}[%d]${NC} ${BOLD}%-25s${NC}\n" "$idx" "$alias"
                         echo -e "      ${CYAN}Token: ${GREEN}${token}${NC}\n"
                         idx=$((idx+1))
-                    done < "$VAULT_FILE"
+                    done <<< "$vault_plain"
                 fi
                 pause
                 ;;
@@ -2699,7 +2833,9 @@ manage_pat_vault() {
             3)
                 if ! _prompt_vault_access; then continue; fi
 
-                if [[ ! -s "$VAULT_FILE" ]]; then
+                local vault_plain
+                vault_plain=$(_vault_decrypt_read)
+                if [[ -z "$vault_plain" ]]; then
                     echo -e "\n${YELLOW}[i] Vault is empty. Nothing to delete.${NC}"
                     pause
                     continue
@@ -2711,26 +2847,31 @@ manage_pat_vault() {
                     [[ -z "$alias" ]] && continue
                     printf "  ${RED}[%d]${NC} ${BOLD}%-25s${NC}\n" "$idx" "$alias"
                     idx=$((idx+1))
-                done < "$VAULT_FILE"
+                done <<< "$vault_plain"
 
                 echo ""
                 read -e -p "Enter token number to delete (or ENTER to cancel): " DEL_NUM
 
                 if [[ -n "$DEL_NUM" ]]; then
                     local current_idx=1
-                    local temp_file=$(mktemp)
+                    local new_plain=""
                     local deleted_alias=""
                     local deleted_token=""
 
                     while IFS='=' read -r alias token; do
+                        [[ -z "$alias" ]] && continue
                         if [[ "$current_idx" -ne "$DEL_NUM" ]]; then
-                            echo "${alias}=${token}" >> "$temp_file"
+                            if [[ -n "$new_plain" ]]; then
+                                new_plain="${new_plain}"$'\n'"${alias}=${token}"
+                            else
+                                new_plain="${alias}=${token}"
+                            fi
                         else
                             deleted_alias="$alias"
                             deleted_token="$token"
                         fi
                         current_idx=$((current_idx+1))
-                    done < "$VAULT_FILE"
+                    done <<< "$vault_plain"
 
                     echo ""
                     echo -e "${YELLOW}[?] How do you want to delete '${deleted_alias}'?${NC}"
@@ -2776,10 +2917,12 @@ manage_pat_vault() {
                     fi
 
                     # Remove from local vault
-                    mv "$temp_file" "$VAULT_FILE"
-                    chmod 600 "$VAULT_FILE"
-                    echo -e "${GREEN}[✔] Removed '${deleted_alias}' from local vault.${NC}"
-                    log_action "Deleted PAT from local vault: ${deleted_alias}"
+                    if ! _vault_encrypt_write "$new_plain"; then
+                        echo -e "${RED}[!] Failed to save the updated vault. Nothing was changed.${NC}"
+                    else
+                        echo -e "${GREEN}[✔] Removed '${deleted_alias}' from local vault.${NC}"
+                        log_action "Deleted PAT from local vault: ${deleted_alias}"
+                    fi
                 fi
                 pause
                 ;;
