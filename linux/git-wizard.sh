@@ -2459,6 +2459,14 @@ _vault_encrypt_write() {
     # replaces $VAULT_FILE — but only after verifying the ciphertext decrypts
     # back to the exact original content, so a bad write can never corrupt
     # or silently lose the vault.
+    #
+    # Every real call path reaches this only after _prompt_vault_access has
+    # set VAULT_SESSION_KEY (by creating a password or verifying the existing
+    # one), so this check should never actually trigger in normal use — it
+    # exists to fail loudly instead of silently encrypting with an empty
+    # password if a future code path ever calls this without going through
+    # _prompt_vault_access first.
+    [[ -n "$VAULT_SESSION_KEY" ]] || return 1
     local plaintext="$1"
     command -v openssl &>/dev/null || return 1
     local tagged="${_VAULT_MARKER}"$'\n'"${plaintext}"
@@ -2487,6 +2495,7 @@ _vault_decrypt_read() {
     # default in every case.
     [[ -s "$VAULT_FILE" ]] || return 0
     if _vault_file_is_encrypted; then
+        [[ -n "$VAULT_SESSION_KEY" ]] || return 1
         command -v openssl &>/dev/null || return 1
         local raw first_line
         raw=$(openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass fd:3 \

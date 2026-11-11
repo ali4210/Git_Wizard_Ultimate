@@ -91,6 +91,23 @@ setup() {
     [ "$before_sum" = "$after_sum" ]
 }
 
+@test "saving a token refuses with no master password set, instead of encrypting with an empty key" {
+    unset VAULT_SESSION_KEY
+    run _vault_encrypt_write "alias=ghp_shouldnotpersist"
+    [ "$status" -ne 0 ]
+    [ ! -s "$VAULT_FILE" ]
+}
+
+@test "reading an encrypted vault refuses with no master password set, instead of decrypting with an empty key" {
+    VAULT_SESSION_KEY="a-real-password"
+    _vault_encrypt_write "alias=ghp_realtoken"
+
+    unset VAULT_SESSION_KEY
+    run _vault_decrypt_read
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"ghp_realtoken"* ]]
+}
+
 @test "saving a token fails closed (does not fall back to plaintext) when openssl is unavailable" {
     VAULT_SESSION_KEY="whatever"
     run bash -c '
