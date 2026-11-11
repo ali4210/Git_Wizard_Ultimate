@@ -792,7 +792,7 @@ Git_Wizard_Ultimate/
 
 ## 🧭 Roadmap
 
-- [ ] 📄 Add a `LICENSE` file and tagged GitHub Releases (enables the built-in update checker)
+- [ ] 📄 Tagged GitHub Releases (enables the built-in update checker)
 - [ ] 🤖 CI: ShellCheck for the Bash engine and PSScriptAnalyzer for the PowerShell modules
 - [ ] 🪟 Windows parity for the Git CLI Hub and the remaining bonus tools
 - [ ] ⏪ Multi-step rollback history (currently the most recent force push/pull per repo)
