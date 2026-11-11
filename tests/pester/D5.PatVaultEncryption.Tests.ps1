@@ -6,10 +6,18 @@
 # are only a meaningful verification of D5 when run on actual Windows PowerShell 5.1 - see the
 # final report for exactly what could/couldn't be executed in this session's Linux sandbox.
 
+# Must be computed here, at the TOP LEVEL (outside any BeforeAll), because Pester evaluates
+# every It's -Skip expression during discovery - which runs before BeforeAll ever executes.
+# Setting this inside BeforeAll meant -Skip always read it as $null (-> always skipped), even
+# on real Windows: this is exactly the bug a real Windows Pester run caught.
+$script:IsWindowsPlatform = (
+    ($PSVersionTable.PSEdition -eq 'Desktop') -or
+    (($PSVersionTable.PSObject.Properties.Name -contains 'Platform') -and ($PSVersionTable.Platform -eq 'Win32NT'))
+)
+
 BeforeAll {
     $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
     . (Join-Path $repoRoot "modules/identity-engine.ps1")
-    $script:IsWindowsPlatform = $env:OS -eq "Windows_NT" -or $PSVersionTable.Platform -eq "Win32NT" -or (-not $PSVersionTable.Platform)
 }
 
 Describe "D5: PAT vault entries are encrypted at rest (Windows DPAPI) instead of plaintext" {
