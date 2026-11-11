@@ -20,8 +20,13 @@ Describe "PS1-1: Craft-Commit only reports success when a commit was actually cr
 
     It "reports failure, not success, when the tree is clean (nothing to commit)" {
         $responses = @("2", "", "test description", "y")
-        $i = 0
-        Mock Read-Host { $v = $responses[$i]; $i++; return $v }
+        $script:i = 0
+        # Note: the counter must be $script:-scoped. Pester invokes this mock body as a
+        # scriptblock, and PowerShell closures give that scriptblock read access to outer
+        # variables but NOT write access - an unscoped "$i++" here would silently create a
+        # new local $i each call (always starting at 0) instead of advancing the real one,
+        # so every Read-Host call would return $responses[0] forever.
+        Mock Read-Host { $v = $responses[$script:i]; $script:i++; return $v }
 
         $beforeSha = (git rev-parse HEAD)
         Craft-Commit
@@ -36,8 +41,13 @@ Describe "PS1-1: Craft-Commit only reports success when a commit was actually cr
         git add file1.txt | Out-Null
 
         $responses = @("2", "", "test description", "y")
-        $i = 0
-        Mock Read-Host { $v = $responses[$i]; $i++; return $v }
+        $script:i = 0
+        # Note: the counter must be $script:-scoped. Pester invokes this mock body as a
+        # scriptblock, and PowerShell closures give that scriptblock read access to outer
+        # variables but NOT write access - an unscoped "$i++" here would silently create a
+        # new local $i each call (always starting at 0) instead of advancing the real one,
+        # so every Read-Host call would return $responses[0] forever.
+        Mock Read-Host { $v = $responses[$script:i]; $script:i++; return $v }
 
         $beforeSha = (git rev-parse HEAD)
         Craft-Commit

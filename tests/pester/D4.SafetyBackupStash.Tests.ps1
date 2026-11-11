@@ -30,8 +30,10 @@ Describe "D4: Discard and Force Sync stash dirty/untracked state instead of dest
         # Drive the REAL Manage-Repo menu: "5" Reset/Undo utility -> "2" Discard -> "0" exit
         # the reset submenu -> "0" exit Manage-Repo.
         $responses = @("5", "2", "0", "0")
-        $i = 0
-        Mock Read-Host { $v = $responses[$i]; $i++; return $v }
+        $script:i = 0
+        # $script: scope is required on the counter - see PS1-1's test for why an unscoped
+        # "$i++" inside this scriptblock would silently never advance.
+        Mock Read-Host { $v = $responses[$script:i]; $script:i++; return $v }
 
         Manage-Repo
 
