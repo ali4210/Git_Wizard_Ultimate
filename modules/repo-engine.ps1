@@ -86,9 +86,21 @@ function Manage-Repo {
                     } elseif ($resetChoice -eq "2") {
                         if (Confirm-DestructiveAction "Discard all uncommitted local changes") {
                             New-SafetyBackup "pre-discard"
+                            $stashName = $null
+                            if (git status --porcelain) {
+                                $stashName = "gw-pre-discard-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+                                if (-not (Invoke-GitWizard stash push -u -m $stashName)) {
+                                    Write-Host "[!] Couldn't stash your local changes - aborting so nothing is lost." -ForegroundColor Red
+                                    Pause-Console
+                                    continue
+                                }
+                            }
                             Invoke-GitWizard checkout -- . | Out-Null
                             Invoke-GitWizard clean -fd | Out-Null
                             Write-Host "[+] Local working tree wiped clean!" -ForegroundColor Green
+                            if ($stashName) {
+                                Write-Host "[i] Your uncommitted/untracked files were saved first - recover with: git stash pop (stash '$stashName')" -ForegroundColor Cyan
+                            }
                         }
                         Pause-Console
                     } elseif ($resetChoice -eq "3") {
@@ -471,7 +483,7 @@ function Invoke-ForceSyncWithOrigin {
     Show-Header
     Write-Host "FORCE SYNC WITH ORIGIN (Nuclear Reset)`n" -ForegroundColor Red
     Write-Host "This makes your LOCAL branch identical to GitHub's version." -ForegroundColor Yellow
-    Write-Host "Any local commits or changes not already on origin will be LOST (a backup tag is created first).`n" -ForegroundColor Yellow
+    Write-Host "Any local commits not already on origin will be LOST (a backup tag is created first). Uncommitted/untracked changes are stashed first, not lost.`n" -ForegroundColor Yellow
 
     $IsRepo = git rev-parse --is-inside-work-tree 2>$null
     if ($IsRepo -ne "true") {
@@ -523,6 +535,17 @@ function Invoke-ForceSyncWithOrigin {
         return
     }
 
+    # --- Step 3.5: Stash dirty/untracked state first - reset --hard / clean -fd would destroy it otherwise ---
+    $stashName = $null
+    if (git status --porcelain) {
+        $stashName = "gw-force-sync-$Branch-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        if (-not (Invoke-GitWizard stash push -u -m $stashName)) {
+            Write-Host "[!] Couldn't stash your local changes - aborting so nothing is lost." -ForegroundColor Red
+            Pause-Console
+            return
+        }
+    }
+
     # --- Step 4: Hard reset local branch to origin/<branch> ---
     Write-Host "`n[4/5] Hard resetting local '$Branch' to 'origin/$Branch'..." -ForegroundColor Cyan
     Invoke-GitWizard reset --hard "origin/$Branch" | Out-Null
@@ -532,6 +555,9 @@ function Invoke-ForceSyncWithOrigin {
     Invoke-GitWizard clean -fd | Out-Null
 
     Write-Host "`n[+] Force sync complete. Local '$Branch' now matches origin/$Branch exactly." -ForegroundColor Green
+    if ($stashName) {
+        Write-Host "[i] Your uncommitted/untracked files were saved first - recover with: git stash pop (stash '$stashName')" -ForegroundColor Cyan
+    }
     Write-Host "    Recover anything lost with: git reset --hard <backup-tag-name-shown-above>" -ForegroundColor Green
     Pause-Console
 }
